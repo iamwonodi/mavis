@@ -1,0 +1,206 @@
+name: Mavis — Build, Version & Push to AWS ECR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+# Prevent concurrent deployments — only one build/push at a time
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel a running deploy; queue instead
+
+env:
+  AWS_REGION:     ${{ vars.AWS_REGION }}
+  ECR_REGISTRY:   ${{ vars.ECR_REGISTRY }}    # e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}  # e.g. mavis
+  IMAGE_NAME:     mavis
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Compute the semantic version for this release
+  # Uses git tags to determine the next version automatically.
+  # Tag your releases with: git tag v1.0.0 && git push --tags
+  # If no tags exist yet, version starts at v0.1.0
+  # ─────────────────────────────────────────────────────────────────────────────
+  version:
+    name: Compute Version
+    runs-on: ubuntu-latest
+    outputs:
+      version:      ${{ steps.semver.outputs.version }}
+      version_tag:  ${{ steps.semver.outputs.version_tag }}
+      short_sha:    ${{ steps.semver.outputs.short_sha }}
+
+    steps:
+      - name: Checkout repository (full history for tag resolution)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required: needs full git history to find tags
+
+      - name: Compute semantic version
+        id: semver
+        run: |
+          # Get the most recent semver tag, default to v0.0.0 if none exists
+          LATEST_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n 1)
+          LATEST_TAG=${LATEST_TAG:-v0.0.0}
+
+          echo "Latest tag found: $LATEST_TAG"
+
+          # Parse major.minor.patch from the tag
+          VERSION_CORE=${LATEST_TAG#v}
+          MAJOR=$(echo "$VERSION_CORE" | cut -d. -f1)
+          MINOR=$(echo "$VERSION_CORE" | cut -d. -f2)
+          PATCH=$(echo "$VERSION_CORE" | cut -d. -f3)
+
+          # Auto-increment patch on every push to main
+          PATCH=$((PATCH + 1))
+
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          SHORT_SHA=$(git rev-parse --short HEAD)
+
+          echo "New version: $NEW_VERSION (sha: $SHORT_SHA)"
+
+          # Export outputs for downstream jobs
+          echo "version=${NEW_VERSION}"        >> $GITHUB_OUTPUT
+          echo "version_tag=${NEW_VERSION}"    >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}"        >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Build the Docker image and push to ECR
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: version
+
+    # Expose outputs so the notify job can use image details
+    outputs:
+      image_uri:    ${{ steps.build.outputs.image_uri }}
+      version:      ${{ needs.version.outputs.version }}
+
+    permissions:
+      id-token:  write   # Required for OIDC authentication with AWS
+      contents:  write   # Required to push the git version tag
+      packages:  read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── AWS Authentication via OIDC (no long-lived secrets) ─────────────────
+      # This uses GitHub's OIDC provider to get short-lived AWS credentials.
+      # No AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY needed in secrets.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:   ${{ secrets.AWS_IAM_ROLE_ARN }}
+          role-session-name: GitHubActions-Mavis-${{ needs.version.outputs.short_sha }}
+          aws-region:        ${{ env.AWS_REGION }}
+
+      # ── ECR Login ────────────────────────────────────────────────────────────
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Docker Build Cache (speeds up repeated builds significantly) ─────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build and Push ───────────────────────────────────────────────────────
+      - name: Build, tag, and push Docker image
+        id: build
+        env:
+          VERSION:     ${{ needs.version.outputs.version }}
+          SHORT_SHA:   ${{ needs.version.outputs.short_sha }}
+        run: |
+          FULL_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+
+          echo "Building image: ${FULL_IMAGE}"
+          echo "Tags: ${VERSION}, ${SHORT_SHA}, latest"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --cache-from type=registry,ref=${FULL_IMAGE}:buildcache \
+            --cache-to   type=registry,ref=${FULL_IMAGE}:buildcache,mode=max \
+            --tag "${FULL_IMAGE}:${VERSION}" \
+            --tag "${FULL_IMAGE}:${SHORT_SHA}" \
+            --tag "${FULL_IMAGE}:latest" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${SHORT_SHA}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.source=${{ github.repositoryUrl }}" \
+            --push \
+            .
+
+          echo "image_uri=${FULL_IMAGE}:${VERSION}" >> $GITHUB_OUTPUT
+          echo "Image pushed: ${FULL_IMAGE}:${VERSION}"
+
+      # ── Tag the commit in git with the new version ───────────────────────────
+      - name: Create and push git version tag
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION" -m "Release $VERSION [ci skip]"
+          git push origin "$VERSION"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Notify TensorDock instance to pull and hot-swap the new image
+  # Connects via SSH and runs the update script on the instance.
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-to-tensordock:
+    name: Deploy to TensorDock Instance
+    runs-on: ubuntu-latest
+    needs: [version, build-and-push]
+    if: success()
+
+    steps:
+      - name: SSH into TensorDock and trigger image update
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:        ${{ secrets.TENSORDOCK_HOST }}
+          username:    ${{ secrets.TENSORDOCK_USER }}
+          key:         ${{ secrets.TENSORDOCK_SSH_KEY }}
+          port:        ${{ secrets.TENSORDOCK_SSH_PORT }}
+          script: |
+            echo "=== Mavis Deployment: ${{ needs.version.outputs.version }} ==="
+            /opt/mavis/update.sh \
+              "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}" \
+              "${{ needs.version.outputs.version }}" \
+              "${{ env.AWS_REGION }}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 4: Post deployment summary to GitHub
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [version, build-and-push, deploy-to-tensordock]
+    if: always()  # Run even if a prior job failed — so you always get a summary
+
+    steps:
+      - name: Write deployment summary
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          IMAGE="${{ needs.build-and-push.outputs.image_uri }}"
+          STATUS="${{ needs.deploy-to-tensordock.result }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🎙️ Mavis Deployment Report
+
+          | Field        | Value                          |
+          |--------------|--------------------------------|
+          | Version      | \`${VERSION}\`                 |
+          | Image URI    | \`${IMAGE}\`                   |
+          | Deploy Status| ${STATUS}                      |
+          | Triggered by | @${{ github.actor }}           |
+          | Commit       | \`${{ github.sha }}\`          |
+          | Timestamp    | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          ### Tags pushed to ECR
+          - \`${IMAGE}\`
+          - \`${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.version.outputs.short_sha }}\`
+          - \`${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest\`
+          EOF
