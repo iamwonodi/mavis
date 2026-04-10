@@ -170,7 +170,7 @@ jobs:
             CMD="$CMD ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}"
             CMD="$CMD ${{ needs.version.outputs.version }}"
             CMD="$CMD ${{ env.AWS_REGION }}"
-            nohup bash -c "$CMD > /var/log/mavis-deploy.log 2>&1" &
+            nohup bash -c "$CMD > /var/log/mavis-deploy.log 2>&1" > /dev/null 2>&1 &
             disown
             echo "Update triggered in background. Check /var/log/mavis-deploy.log on the instance."
   # ─────────────────────────────────────────────────────────────────────────────
