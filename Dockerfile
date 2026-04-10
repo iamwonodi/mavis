@@ -74,8 +74,22 @@ WORKDIR /workspace
 RUN git clone https://github.com/w-okada/voice-changer.git /workspace/voice-changer
 
 # Install w-okada's own requirements (best-effort; some may already be satisfied)
+# First pass — install pinned versions without pulling their deps
 RUN pip3 install --no-cache-dir --no-deps \
     -r /workspace/voice-changer/server/requirements.txt || true
+
+# Second pass — fill in all transitive dependencies
+# This catches packages like audioread that w-okada needs but does not pin
+RUN pip3 install --no-cache-dir \
+    -r /workspace/voice-changer/server/requirements.txt || true
+
+# Explicitly install known missing transitive deps as a safety net
+RUN pip3 install --no-cache-dir \
+    audioread \
+    librosa \
+    resampy \
+    soundfile \
+    praat-parselmouth
 
 # ── Copy Mavis application files ──────────────────────────────────────────────
 WORKDIR /workspace/mavis
