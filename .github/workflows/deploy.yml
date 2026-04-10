@@ -4,121 +4,106 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
-# Prevent concurrent deployments — only one build/push at a time
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: false  # Never cancel a running deploy; queue instead
+  cancel-in-progress: false
 
 env:
   AWS_REGION:     ${{ vars.AWS_REGION }}
-  ECR_REGISTRY:   ${{ vars.ECR_REGISTRY }}    # e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}  # e.g. mavis
+  ECR_REGISTRY:   ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   IMAGE_NAME:     mavis
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 1: Compute the semantic version for this release
-  # Uses git tags to determine the next version automatically.
-  # Tag your releases with: git tag v1.0.0 && git push --tags
-  # If no tags exist yet, version starts at v0.1.0
+  # JOB 1: Compute version
   # ─────────────────────────────────────────────────────────────────────────────
   version:
     name: Compute Version
     runs-on: ubuntu-latest
     outputs:
-      version:      ${{ steps.semver.outputs.version }}
-      version_tag:  ${{ steps.semver.outputs.version_tag }}
-      short_sha:    ${{ steps.semver.outputs.short_sha }}
+      version:    ${{ steps.semver.outputs.version }}
+      short_sha:  ${{ steps.semver.outputs.short_sha }}
 
     steps:
-      - name: Checkout repository (full history for tag resolution)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Required: needs full git history to find tags
+          fetch-depth: 0
 
       - name: Compute semantic version
         id: semver
         run: |
-          # Get the most recent semver tag, default to v0.0.0 if none exists
           LATEST_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n 1)
           LATEST_TAG=${LATEST_TAG:-v0.0.0}
-
-          echo "Latest tag found: $LATEST_TAG"
-
-          # Parse major.minor.patch from the tag
           VERSION_CORE=${LATEST_TAG#v}
           MAJOR=$(echo "$VERSION_CORE" | cut -d. -f1)
           MINOR=$(echo "$VERSION_CORE" | cut -d. -f2)
           PATCH=$(echo "$VERSION_CORE" | cut -d. -f3)
-
-          # Auto-increment patch on every push to main
           PATCH=$((PATCH + 1))
-
           NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
           SHORT_SHA=$(git rev-parse --short HEAD)
-
-          echo "New version: $NEW_VERSION (sha: $SHORT_SHA)"
-
-          # Export outputs for downstream jobs
-          echo "version=${NEW_VERSION}"        >> $GITHUB_OUTPUT
-          echo "version_tag=${NEW_VERSION}"    >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}"        >> $GITHUB_OUTPUT
+          echo "version=${NEW_VERSION}"     >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}"     >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION ($SHORT_SHA)"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 2: Build the Docker image and push to ECR
+  # JOB 2: Build and push to ECR
   # ─────────────────────────────────────────────────────────────────────────────
   build-and-push:
     name: Build & Push to ECR
     runs-on: ubuntu-latest
     needs: version
-
-    # Expose outputs so the notify job can use image details
     outputs:
-      image_uri:    ${{ steps.build.outputs.image_uri }}
-      version:      ${{ needs.version.outputs.version }}
+      image_uri: ${{ steps.build.outputs.image_uri }}
 
     permissions:
-      id-token:  write   # Required for OIDC authentication with AWS
-      contents:  write   # Required to push the git version tag
-      packages:  read
+      id-token: write
+      contents: write
+      packages: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── AWS Authentication via OIDC (no long-lived secrets) ─────────────────
-      # This uses GitHub's OIDC provider to get short-lived AWS credentials.
-      # No AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY needed in secrets.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume:   ${{ secrets.AWS_IAM_ROLE_ARN }}
+          role-to-assume:    ${{ secrets.AWS_IAM_ROLE_ARN }}
           role-session-name: GitHubActions-Mavis-${{ needs.version.outputs.short_sha }}
           aws-region:        ${{ env.AWS_REGION }}
 
-      # ── ECR Login ────────────────────────────────────────────────────────────
       - name: Log in to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── Docker Build Cache (speeds up repeated builds significantly) ─────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── Build and Push ───────────────────────────────────────────────────────
-      - name: Build, tag, and push Docker image
+      - name: Check version tag does not already exist
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          EXISTS=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --image-ids imageTag="$VERSION" \
+            --query 'imageDetails[0].imageTags' \
+            --output text 2>/dev/null || echo "NOTFOUND")
+          if [ "$EXISTS" != "NOTFOUND" ] && [ "$EXISTS" != "None" ]; then
+            echo "ERROR: Tag $VERSION already exists. Aborting."
+            exit 1
+          fi
+          echo "Tag $VERSION is clean. Proceeding."
+
+      - name: Build, tag and push Docker image
         id: build
         env:
-          VERSION:     ${{ needs.version.outputs.version }}
-          SHORT_SHA:   ${{ needs.version.outputs.short_sha }}
+          VERSION:   ${{ needs.version.outputs.version }}
+          SHORT_SHA: ${{ needs.version.outputs.short_sha }}
         run: |
           FULL_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
-
-          echo "Building image: ${FULL_IMAGE}"
-          echo "Tags: ${VERSION}, ${SHORT_SHA}, latest"
-
           docker buildx build \
             --platform linux/amd64 \
             --cache-from type=registry,ref=${FULL_IMAGE}:buildcache \
@@ -132,12 +117,9 @@ jobs:
             --label "org.opencontainers.image.source=${{ github.repositoryUrl }}" \
             --push \
             .
-
           echo "image_uri=${FULL_IMAGE}:${VERSION}" >> $GITHUB_OUTPUT
-          echo "Image pushed: ${FULL_IMAGE}:${VERSION}"
 
-      # ── Tag the commit in git with the new version ───────────────────────────
-      - name: Create and push git version tag
+      - name: Push git version tag
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
@@ -146,9 +128,37 @@ jobs:
           git tag "$VERSION" -m "Release $VERSION [ci skip]"
           git push origin "$VERSION"
 
+      # ── ECR Cleanup: remove untagged images after every push ────────────────
+      # This keeps ECR clean by deleting the unnamed 'Image' entries that
+      # accumulate as old manifests whenever tags are updated.
+      - name: Clean up untagged ECR images
+        run: |
+          echo "Fetching untagged image digests..."
+          UNTAGGED=$(aws ecr list-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --filter tagStatus=UNTAGGED \
+            --query 'imageIds[*]' \
+            --output json)
+
+          COUNT=$(echo "$UNTAGGED" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+
+          if [ "$COUNT" -gt "0" ]; then
+            echo "Deleting $COUNT untagged image(s)..."
+            aws ecr batch-delete-image \
+              --repository-name "$ECR_REPOSITORY" \
+              --region "$AWS_REGION" \
+              --image-ids "$UNTAGGED" \
+              --output text
+            echo "Untagged images deleted."
+          else
+            echo "No untagged images to clean up."
+          fi
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 3: Notify TensorDock instance to pull and hot-swap the new image
-  # Connects via SSH and runs the update script on the instance.
+  # JOB 3: Deploy to TensorDock via tmux
+  # Fires the update script inside a tmux session so it survives independently
+  # of the SSH connection. The pipeline completes in seconds.
   # ─────────────────────────────────────────────────────────────────────────────
   deploy-to-tensordock:
     name: Deploy to TensorDock Instance
@@ -157,30 +167,41 @@ jobs:
     if: success()
 
     steps:
-      - name: SSH into TensorDock and trigger image update
+      - name: SSH into TensorDock and trigger update via tmux
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:        ${{ secrets.TENSORDOCK_HOST }}
-          username:    ${{ secrets.TENSORDOCK_USER }}
-          key:         ${{ secrets.TENSORDOCK_SSH_KEY }}
-          port:        ${{ secrets.TENSORDOCK_SSH_PORT }}
+          host:     ${{ secrets.TENSORDOCK_HOST }}
+          username: ${{ secrets.TENSORDOCK_USER }}
+          key:      ${{ secrets.TENSORDOCK_SSH_KEY }}
+          port:     ${{ secrets.TENSORDOCK_SSH_PORT }}
           script: |
             echo "=== Mavis Deployment: ${{ needs.version.outputs.version }} ==="
-            CMD='/opt/mavis/update.sh'
+
+            # Kill any previous deployment tmux session if it is still running
+            tmux kill-session -t mavis-deploy 2>/dev/null || true
+
+            # Build the command as a variable to avoid quoting issues
+            CMD="/opt/mavis/update.sh"
             CMD="$CMD ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}"
             CMD="$CMD ${{ needs.version.outputs.version }}"
             CMD="$CMD ${{ env.AWS_REGION }}"
-            nohup bash -c "$CMD > /var/log/mavis-deploy.log 2>&1" > /dev/null 2>&1 &
-            disown
-            echo "Update triggered in background. Check /var/log/mavis-deploy.log on the instance."
+
+            # Start a detached tmux session that runs the update script
+            # The session persists on the instance after SSH closes.
+            tmux new-session -d -s mavis-deploy "bash $CMD; echo EXIT_CODE=\$? >> /var/log/mavis-deploy.log"
+
+            echo "Deployment running in tmux session 'mavis-deploy' on the instance."
+            echo "To monitor: ssh tensordock then: tmux attach -t mavis-deploy"
+            echo "Or tail the log: tail -f /var/log/mavis-deploy.log"
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 4: Post deployment summary to GitHub
+  # JOB 4: Deployment summary
   # ─────────────────────────────────────────────────────────────────────────────
   notify:
     name: Deployment Summary
     runs-on: ubuntu-latest
     needs: [version, build-and-push, deploy-to-tensordock]
-    if: always()  # Run even if a prior job failed — so you always get a summary
+    if: always()
 
     steps:
       - name: Write deployment summary
@@ -188,21 +209,25 @@ jobs:
           VERSION="${{ needs.version.outputs.version }}"
           IMAGE="${{ needs.build-and-push.outputs.image_uri }}"
           STATUS="${{ needs.deploy-to-tensordock.result }}"
-
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ## 🎙️ Mavis Deployment Report
 
-          | Field        | Value                          |
-          |--------------|--------------------------------|
-          | Version      | \`${VERSION}\`                 |
-          | Image URI    | \`${IMAGE}\`                   |
-          | Deploy Status| ${STATUS}                      |
-          | Triggered by | @${{ github.actor }}           |
-          | Commit       | \`${{ github.sha }}\`          |
-          | Timestamp    | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | Field         | Value                              |
+          |---------------|------------------------------------|
+          | Version       | \`${VERSION}\`                     |
+          | Image URI     | \`${IMAGE}\`                       |
+          | Deploy Status | ${STATUS}                          |
+          | Triggered by  | @${{ github.actor }}               |
+          | Commit        | \`${{ github.sha }}\`              |
+          | Timestamp     | $(date -u '+%Y-%m-%d %H:%M UTC')   |
 
-          ### Tags pushed to ECR
-          - \`${IMAGE}\`
-          - \`${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.version.outputs.short_sha }}\`
-          - \`${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:latest\`
+          ### To monitor deployment progress on the instance:
+          \`\`\`
+          ssh tensordock
+          tmux attach -t mavis-deploy
+          \`\`\`
+          Or tail the log:
+          \`\`\`
+          tail -f /var/log/mavis-deploy.log
+          \`\`\`
           EOF
