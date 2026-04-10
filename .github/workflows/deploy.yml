@@ -166,13 +166,13 @@ jobs:
           port:        ${{ secrets.TENSORDOCK_SSH_PORT }}
           script: |
             echo "=== Mavis Deployment: ${{ needs.version.outputs.version }} ==="
-            nohup bash -c '/opt/mavis/update.sh \
-              "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}" \
-              "${{ needs.version.outputs.version }}" \
-              "${{ env.AWS_REGION }}" \
-              > /var/log/mavis-deploy.log 2>&1' &
+            CMD='/opt/mavis/update.sh'
+            CMD="$CMD ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}"
+            CMD="$CMD ${{ needs.version.outputs.version }}"
+            CMD="$CMD ${{ env.AWS_REGION }}"
+            nohup bash -c "$CMD > /var/log/mavis-deploy.log 2>&1" &
+            disown
             echo "Update triggered in background. Check /var/log/mavis-deploy.log on the instance."
-
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 4: Post deployment summary to GitHub
   # ─────────────────────────────────────────────────────────────────────────────
