@@ -36,12 +36,12 @@ start_wokada() {
     nohup python3 MMVCServerSIO.py "${WOKADA_ARGS[@]}" > "$LOG_FILE" 2>&1 &
     local pid=$!
     log "w-okada launched (PID ${pid}). Waiting 8s for model load..."
-    sleep 8
+    sleep 20
 }
 
 wait_for_wokada() {
     log "Verifying w-okada WebSocket is reachable on port 18888..."
-    local retries=10
+    local retries=24
     while ! curl -sf http://localhost:18888/ > /dev/null 2>&1; do
         retries=$((retries - 1))
         if [ "$retries" -le 0 ]; then
@@ -49,7 +49,7 @@ wait_for_wokada() {
             break
         fi
         log "Waiting for w-okada... ($retries retries left)"
-        sleep 2
+        sleep 5
     done
 }
 
