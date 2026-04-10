@@ -164,7 +164,6 @@ jobs:
           username:    ${{ secrets.TENSORDOCK_USER }}
           key:         ${{ secrets.TENSORDOCK_SSH_KEY }}
           port:        ${{ secrets.TENSORDOCK_SSH_PORT }}
-          command_timeout: 30m
           script: |
             echo "=== Mavis Deployment: ${{ needs.version.outputs.version }} ==="
             nohup bash -c '/opt/mavis/update.sh \
