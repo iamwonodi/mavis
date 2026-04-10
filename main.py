@@ -32,7 +32,7 @@ SRT_EGRESS_URL = "srt://0.0.0.0:6001?mode=listener&latency=200"
 WOKADA_WS_URL   = "ws://localhost:18888/socket.io/?EIO=4&transport=websocket"
 
 # Audio format shared between both pipelines
-AUDIO_CAPS = "audio/x-raw,format=S16LE,rate=48000,channels=1"
+AUDIO_CAPS = "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved"
 SAMPLE_RATE = 48000
 
 Gst.init(None)
@@ -191,7 +191,7 @@ class AudioBridge:
     async def start(self):
         # FIX #3: Capture the running loop HERE, not in __init__
         self.loop  = asyncio.get_running_loop()
-        self.queue = asyncio.Queue(maxsize=20)
+        self.queue = asyncio.Queue(maxsize=100)
 
         self.build_pipelines()
         await self.connect_websocket()
