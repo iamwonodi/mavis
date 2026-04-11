@@ -35,7 +35,7 @@ start_wokada() {
     cd "$WOKADA_DIR" || { log "ERROR: Cannot cd to $WOKADA_DIR"; exit 1; }
     nohup python3 MMVCServerSIO.py "${WOKADA_ARGS[@]}" > "$LOG_FILE" 2>&1 &
     local pid=$!
-    log "w-okada launched (PID ${pid}). Waiting 8s for model load..."
+    log "w-okada launched (PID ${pid}). Waiting 20s for model load..."
     sleep 20
 }
 
