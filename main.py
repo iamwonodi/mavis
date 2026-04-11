@@ -172,7 +172,7 @@ class AudioBridge:
 
         ingress_str = (
             f"srtsrc uri=\"{SRT_INGRESS_URL}\" ! "
-            "tsdemux ! aacparse ! avdec_aac ! "
+            "decodebin name=decoder ! "
             "audioconvert ! audioresample ! "
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             f"{AUDIO_CAPS} ! "
