@@ -95,11 +95,19 @@ class AudioBridge:
 
                 # FIX #3: Use self.loop (set in start()) — safe cross-thread call
                 if self.loop and not self.loop.is_closed():
-                    try:
-                        self.loop.call_soon_threadsafe(self.queue.put_nowait, data)
-                    except asyncio.QueueFull:
-                        pass  # Drop oldest if queue backs up — latency > correctness
+                    # Use call_soon_threadsafe with a lambda that silently
+                # drops if full — never raises QueueFull
+                    self.loop.call_soon_threadsafe(
+                        self._safe_put, data
+                )
         return Gst.FlowReturn.OK
+    
+    def _safe_put(self, data):
+        """Put data on queue, silently drop if full. Never raises."""
+        try:
+            self.queue.put_nowait(data)
+        except asyncio.QueueFull:
+            pass  # Drop oldest chunks under load — latency over correctness
 
     # ── Audio processing loop ──────────────────────────────────────────────────
 
@@ -111,7 +119,7 @@ class AudioBridge:
             if self.ws and not self.ws.closed:
                 try:
                     await self.ws.send_bytes(chunk)
-                    msg = await asyncio.wait_for(self.ws.receive(), timeout=0.2)
+                    msg = await asyncio.wait_for(self.ws.receive(), timeout=1.0)
                     if msg.type == aiohttp.WSMsgType.BINARY:
                         self.push_to_egress(msg.data)
                     else:
@@ -166,18 +174,23 @@ class AudioBridge:
             f"srtsrc uri=\"{SRT_INGRESS_URL}\" ! "
             "tsdemux ! aacparse ! avdec_aac ! "
             "audioconvert ! audioresample ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             f"{AUDIO_CAPS} ! "
             "appsink name=sink_in emit-signals=true sync=false "
             "max-buffers=2 drop=true"
-        )
+    )
 
         egress_str = (
             f"appsrc name=source_out format=time is-live=true "
             f"caps=\"{AUDIO_CAPS}\" ! "
-            "audioconvert ! avenc_aac bitrate=128000 ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
+            "audioconvert ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
+            "avenc_aac bitrate=128000 ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             "mpegtsmux ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\""
-        )
+    )
 
         self.ingress_pipeline = Gst.parse_launch(ingress_str)
         self.egress_pipeline  = Gst.parse_launch(egress_str)
@@ -191,7 +204,9 @@ class AudioBridge:
     async def start(self):
         # FIX #3: Capture the running loop HERE, not in __init__
         self.loop  = asyncio.get_running_loop()
-        self.queue = asyncio.Queue(maxsize=100)
+        # Increased from 20 to 200 — prevents QueueFull exceptions
+        # during w-okada processing bursts
+        self.queue = asyncio.Queue(maxsize=200)
 
         self.build_pipelines()
         await self.connect_websocket()
