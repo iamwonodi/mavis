@@ -83,10 +83,7 @@ RUN pip3 install --no-cache-dir --no-deps \
 RUN pip3 install --no-cache-dir \
     -r /workspace/voice-changer/server/requirements.txt || true
 
-# Step 3: Install all known lazy-loaded dependencies that w-okada
-# only imports when specific features are triggered at runtime.
-# Installing all of them now means no module will ever be missing
-# regardless of which w-okada feature gets activated.
+# Step 3a: Install known lazy-loaded dependencies
 RUN pip3 install --no-cache-dir \
     audioread \
     librosa \
@@ -101,18 +98,23 @@ RUN pip3 install --no-cache-dir \
     hydra-core \
     editdistance \
     pyworld \
-    fcpe \
     local-attention \
     rotary-embedding-torch \
     gradio
 
-# Step 4: fairseq — Facebook's sequence modeling library used by RVC embedders.
-# Must be installed from source because the PyPI release has known
-# incompatibilities with PyTorch 2.0+ and Python 3.10.
+# Step 3b: Install packages that require GitHub source installs
+# fcpe is not on PyPI — must come from GitHub
+RUN pip3 install --no-cache-dir \
+    git+https://github.com/CNChTu/FCPE.git \
+    || pip3 install --no-cache-dir \
+    git+https://github.com/gudgud96/frechet-audio-distance.git \
+    || echo "WARNING: fcpe install failed — f0 detection may fall back to alternative"
+
+# Step 4: fairseq from source
 RUN pip3 install --no-cache-dir \
     git+https://github.com/facebookresearch/fairseq.git@main \
     || pip3 install --no-cache-dir fairseq \
-    || echo "fairseq install failed — will attempt at runtime"
+    || echo "WARNING: fairseq install failed"
 
 # Step 5: Verify critical imports are resolvable at build time
 # If any of these fail the Docker build itself fails, catching
