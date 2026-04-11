@@ -94,8 +94,6 @@ RUN pip3 install --no-cache-dir \
     einops \
     diffusers \
     antlr4-python3-runtime==4.8 \
-    omegaconf \
-    hydra-core \
     editdistance \
     pyworld \
     local-attention \
@@ -111,10 +109,31 @@ RUN pip3 install --no-cache-dir \
     || echo "WARNING: fcpe install failed — f0 detection may fall back to alternative"
 
 # Step 4: fairseq from source
+# fairseq — requires careful version pinning to resolve the
+# omegaconf/hydra-core conflict and the broken PyPI tarball.
+# Strategy: pin omegaconf and hydra-core to versions fairseq
+# accepts, then install fairseq with --no-deps to bypass
+# the conflict resolver entirely, then install its remaining
+# deps manually.
 RUN pip3 install --no-cache-dir \
+    "omegaconf==2.0.6" \
+    "hydra-core==1.0.7" \
+    --index-url https://pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    || true
+
+RUN pip3 install --no-cache-dir --no-deps \
     git+https://github.com/facebookresearch/fairseq.git@main \
-    || pip3 install --no-cache-dir fairseq \
-    || echo "WARNING: fairseq install failed"
+    && echo "fairseq installed successfully" \
+    || echo "WARNING: fairseq GitHub install failed"
+
+# Install fairseq's remaining runtime dependencies manually
+# since we used --no-deps above
+RUN pip3 install --no-cache-dir \
+    sacrebleu \
+    bitarray \
+    cython \
+    && echo "fairseq runtime deps installed"
 
 # Step 5: Verify critical imports are resolvable at build time
 # If any of these fail the Docker build itself fails, catching
