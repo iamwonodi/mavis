@@ -171,7 +171,7 @@ class AudioBridge:
         """
 
         ingress_str = (
-            f"srtsrc uri=\"{SRT_INGRESS_URL}\" ! "
+            f"srtsrc uri=\"{SRT_INGRESS_URL}\" reuse=true ! "
             "decodebin name=decoder ! "
             "audioconvert ! audioresample ! "
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
@@ -211,6 +211,13 @@ class AudioBridge:
         self.build_pipelines()
         await self.connect_websocket()
 
+        # Watch for pipeline errors and restart on disconnect
+        for pipeline in [self.ingress_pipeline, self.egress_pipeline]:
+            bus = pipeline.get_bus()
+            bus.add_signal_watch()
+            bus.connect("message::error", self.on_pipeline_error)
+            bus.connect("message::eos", self.on_pipeline_eos)
+
         self.ingress_pipeline.set_state(Gst.State.PLAYING)
         self.egress_pipeline.set_state(Gst.State.PLAYING)
         print("[GST] Both pipelines are PLAYING.")
@@ -218,6 +225,30 @@ class AudioBridge:
         print(f"[GST] Sending processed audio to: {SRT_EGRESS_URL}")
 
         await self.process_loop()
+
+    def on_pipeline_error(self, bus, message):
+        err, debug = message.parse_error()
+        print(f"[GST ERROR] {err.message}. Restarting pipeline...")
+        self.loop.call_soon_threadsafe(
+            self.loop.create_task,
+            self.restart_ingress()
+        )
+
+    def on_pipeline_eos(self, bus, message):
+        print("[GST] End of stream detected. Restarting ingress...")
+        self.loop.call_soon_threadsafe(
+            self.loop.create_task,
+            self.restart_ingress()
+        )
+
+    async def restart_ingress(self):
+        """Restarts the ingress pipeline to accept a new SRT connection."""
+        print("[GST] Restarting ingress pipeline...")
+        if self.ingress_pipeline:
+            self.ingress_pipeline.set_state(Gst.State.NULL)
+            await asyncio.sleep(1)
+            self.ingress_pipeline.set_state(Gst.State.PLAYING)
+            print("[GST] Ingress pipeline restarted.")
 
     def stop(self):
         print("[MAVIS] Stopping pipelines...")
