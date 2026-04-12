@@ -69,6 +69,8 @@ RUN pip3 install --no-cache-dir \
     "pyOpenSSL==21.0.0" \
     "cryptography==38.0.4"
 
+RUN pip3 install --no-cache-dir python-socketio[asyncio_client] aiohttp
+
 # ── Clone w-okada voice changer ───────────────────────────────────────────────
 WORKDIR /workspace
 RUN git clone https://github.com/w-okada/voice-changer.git /workspace/voice-changer

@@ -1,38 +1,43 @@
 #!/usr/bin/env python3
 """
 Mavis — Real-Time AI Voice Conversion Bridge
-SRT In → w-okada Voice Changer (WebSocket) → SRT Out
+SRT In → w-okada Voice Changer (Socket.IO) → SRT Out
 
-Bug fixes applied vs original:
-  1. Fixed typo in WOKADA_WS_URL ("s://" → "ws://")
-  2. Split the GStreamer pipeline into two separate Gst.Pipeline objects
-     (parse_launch cannot handle two disconnected source chains)
-  3. Fixed asyncio event loop reference: captured inside start() not __init__
-  4. Fixed appsrc buffer timestamps to avoid encoder drift/drops
-  5. Fixed stop() to use loop.call_soon_threadsafe for async cleanup
+Key fix in this version:
+  Previous versions used raw aiohttp WebSocket to send audio bytes directly
+  to w-okada. This caused ValueError in w-okada's Socket.IO packet parser
+  because it received raw PCM bytes instead of properly framed Socket.IO
+  messages. w-okada never processed any audio — every chunk timed out and
+  was bypassed, giving unmodified audio.
+
+  This version uses python-socketio AsyncClient which correctly frames all
+  messages in the Socket.IO protocol. The event name and message format are
+  taken directly from w-okada's MMVC_Namespace.py:
+
+    Send:    emit("request_message", [timestamp, raw_bytes])
+    Receive: on("response")  →  [timestamp, bin, perf]
+             where bin = struct.pack("<Nh", ...) of int16 audio samples
 """
 
 import gi
 import asyncio
-import aiohttp
+import socketio
+import struct
 import signal
 import sys
 import time
-import os
 
 gi.require_version('Gst', '1.0')
 gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstApp, GLib
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
-SRT_INGRESS_URL = "srt://0.0.0.0:6000?mode=listener&latency=200&pbkeylen=0"
-SRT_EGRESS_URL = "srt://0.0.0.0:6001?mode=listener&latency=200"
+SRT_INGRESS_URL  = "srt://0.0.0.0:6000?mode=listener&latency=200"
+SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=200"
+WOKADA_HTTP_URL  = "http://localhost:18888"
+WOKADA_NAMESPACE = "/test"   # w-okada registers its namespace as "/test"
 
-# FIX #1: Was "s://..." (missing the 'w'). This caused a connection error on every start.
-WOKADA_WS_URL   = "ws://localhost:18888/socket.io/?EIO=4&transport=websocket"
-
-# Audio format shared between both pipelines
-AUDIO_CAPS = "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved"
+AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved"
 SAMPLE_RATE = 48000
 
 Gst.init(None)
@@ -40,117 +45,179 @@ Gst.init(None)
 
 class AudioBridge:
     def __init__(self):
-        # FIX #3: Do NOT capture the event loop here.
-        # asyncio.run() creates a brand new loop; self.loop must be set
-        # inside start() after that loop is running.
         self.loop: asyncio.AbstractEventLoop | None = None
         self.queue: asyncio.Queue | None = None
 
-        self.ingress_pipeline = None   # srtsrc → appsink
-        self.egress_pipeline  = None   # appsrc → srtclientsink
+        self.ingress_pipeline = None
+        self.egress_pipeline  = None
 
-        self.ws_session = None
-        self.ws = None
+        # Socket.IO client — replaces raw aiohttp WebSocket
+        self.sio: socketio.AsyncClient | None = None
+        self.sio_connected = False
 
-        # FIX #4: Track running timestamp for egress buffer PTS
+        # Response queue: w-okada sends back converted audio asynchronously
+        # We need to match responses to requests by timestamp
+        self.response_queue: asyncio.Queue | None = None
+
+        # Timestamp counter for matching requests to responses
+        self._timestamp = 0
+
+        # GStreamer buffer timing
         self._pts = 0
-        self._duration_per_chunk = 0  # set after first chunk arrives
+        self._duration_per_chunk = 0
 
-    # ── WebSocket ──────────────────────────────────────────────────────────────
+    # ── Socket.IO connection ───────────────────────────────────────────────────
 
-    async def connect_websocket(self):
-        """Maintains connection to the w-okada voice changer WebSocket."""
-        if self.ws_session is None:
-            self.ws_session = aiohttp.ClientSession()
+    async def connect_socketio(self):
+        """Connect to w-okada using proper Socket.IO protocol."""
+        self.sio = socketio.AsyncClient(
+            logger=False,
+            engineio_logger=False,
+            reconnection=True,
+            reconnection_attempts=0,   # retry forever
+            reconnection_delay=2,
+        )
+
+        @self.sio.on("connect", namespace=WOKADA_NAMESPACE)
+        async def on_connect():
+            self.sio_connected = True
+            print("[SIO] Connected to w-okada!")
+
+        @self.sio.on("disconnect", namespace=WOKADA_NAMESPACE)
+        async def on_disconnect():
+            self.sio_connected = False
+            print("[SIO] Disconnected from w-okada. Reconnecting...")
+
+        @self.sio.on("response", namespace=WOKADA_NAMESPACE)
+        async def on_response(msg):
+            """
+            w-okada emits: ["response", [timestamp, bin, perf]]
+            msg here is the data argument: [timestamp, bin, perf]
+            bin is struct-packed int16 audio samples.
+            """
+            try:
+                if isinstance(msg, list) and len(msg) >= 2:
+                    bin_data = msg[1]
+                    if isinstance(bin_data, (bytes, bytearray)) and len(bin_data) > 0:
+                        await self.response_queue.put(bytes(bin_data))
+                    else:
+                        # w-okada returned empty/zero audio (no model loaded)
+                        await self.response_queue.put(None)
+                else:
+                    await self.response_queue.put(None)
+            except Exception as e:
+                print(f"[SIO] Response handler error: {e}")
+                await self.response_queue.put(None)
+
         while True:
             try:
-                print(f"[WS] Connecting to {WOKADA_WS_URL}...")
-                self.ws = await self.ws_session.ws_connect(WOKADA_WS_URL)
-                print("[WS] Connected!")
+                print(f"[SIO] Connecting to {WOKADA_HTTP_URL} namespace={WOKADA_NAMESPACE}...")
+                await self.sio.connect(
+                    WOKADA_HTTP_URL,
+                    namespaces=[WOKADA_NAMESPACE],
+                    socketio_path="/socket.io/",
+                    transports=["websocket"],
+                )
+                print("[SIO] Connected!")
                 return
             except Exception as e:
-                print(f"[WS] Connection failed: {e}. Retrying in 2s...")
+                print(f"[SIO] Connection failed: {e}. Retrying in 2s...")
                 await asyncio.sleep(2)
 
     # ── GStreamer callbacks ────────────────────────────────────────────────────
 
     def on_new_sample(self, appsink):
-        """
-        Called on GStreamer's internal thread when a decoded audio chunk arrives.
-        Places data on the asyncio queue in a thread-safe way.
-        """
+        """Called on GStreamer thread when decoded audio chunk arrives."""
         sample = appsink.emit("pull-sample")
         if sample:
             buf = sample.get_buffer()
             result, map_info = buf.map(Gst.MapFlags.READ)
             if result:
-                data = bytes(map_info.data)  # copy bytes before unmap
-
-                # FIX #4: Compute duration from actual chunk length
-                # S16LE = 2 bytes per sample, 1 channel
+                data = bytes(map_info.data)
                 n_samples = len(data) // 2
                 self._duration_per_chunk = (n_samples * Gst.SECOND) // SAMPLE_RATE
-
                 buf.unmap(map_info)
-
-                # FIX #3: Use self.loop (set in start()) — safe cross-thread call
                 if self.loop and not self.loop.is_closed():
-                    # Use call_soon_threadsafe with a lambda that silently
-                # drops if full — never raises QueueFull
-                    self.loop.call_soon_threadsafe(
-                        self._safe_put, data
-                )
+                    self.loop.call_soon_threadsafe(self._safe_put, data)
         return Gst.FlowReturn.OK
-    
+
     def _safe_put(self, data):
-        """Put data on queue, silently drop if full. Never raises."""
+        """Thread-safe queue put that silently drops if full."""
         try:
             self.queue.put_nowait(data)
         except asyncio.QueueFull:
-            pass  # Drop oldest chunks under load — latency over correctness
+            pass
 
     # ── Audio processing loop ──────────────────────────────────────────────────
 
     async def process_loop(self):
-        """Dequeues audio chunks, sends to w-okada, pushes result to egress."""
+        """
+        Dequeues PCM audio chunks, sends to w-okada via Socket.IO,
+        receives converted audio, pushes to egress pipeline.
+
+        Protocol (from MMVC_Namespace.py):
+          Send:    emit("request_message", [timestamp, raw_bytes], namespace="/test")
+          Receive: on("response") → [timestamp, bin, perf]
+                   where bin = struct-packed int16 samples of converted audio
+        """
         print("[BRIDGE] Processing loop active.")
         while True:
             chunk = await self.queue.get()
-            if self.ws and not self.ws.closed:
+
+            if self.sio_connected and self.sio:
                 try:
-                    await self.ws.send_bytes(chunk)
-                    msg = await asyncio.wait_for(self.ws.receive(), timeout=1.0)
-                    if msg.type == aiohttp.WSMsgType.BINARY:
-                        self.push_to_egress(msg.data)
-                    else:
-                        # Non-binary response (e.g. ping/text) — bypass
+                    self._timestamp += 1
+                    ts = self._timestamp
+
+                    # Clear any stale responses before sending
+                    while not self.response_queue.empty():
+                        try:
+                            self.response_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+
+                    # Send to w-okada using correct Socket.IO event and format
+                    await self.sio.emit(
+                        "request_message",
+                        [ts, chunk],
+                        namespace=WOKADA_NAMESPACE
+                    )
+
+                    # Wait for response with timeout
+                    try:
+                        response = await asyncio.wait_for(
+                            self.response_queue.get(),
+                            timeout=1.0
+                        )
+                        if response is not None and len(response) > 0:
+                            self.push_to_egress(response)
+                            print(f"[BRIDGE] Converted chunk {ts} pushed to egress.")
+                        else:
+                            # w-okada returned empty — no model active, bypass
+                            print("[BRIDGE] w-okada returned empty. Is a model loaded and started?")
+                            self.push_to_egress(chunk)
+                    except asyncio.TimeoutError:
+                        print("[BRIDGE] w-okada timeout. Bypassing.")
                         self.push_to_egress(chunk)
-                except asyncio.TimeoutError:
-                    print("[WS] Timeout waiting for w-okada response. Bypassing.")
-                    self.push_to_egress(chunk)
+
                 except Exception as e:
-                    print(f"[WS ERROR] {e}. Reconnecting...")
+                    print(f"[SIO ERROR] {e}. Bypassing.")
                     self.push_to_egress(chunk)
-                    await self.connect_websocket()
             else:
-                # Fallback: bypass w-okada if WebSocket is down
+                # Bypass if not connected to w-okada
                 self.push_to_egress(chunk)
 
     # ── Egress push ────────────────────────────────────────────────────────────
 
     def push_to_egress(self, data: bytes):
-        """Pushes processed audio into the egress GStreamer pipeline."""
+        """Push audio bytes into the egress GStreamer pipeline."""
         appsrc = self.egress_pipeline.get_by_name("source_out")
         if appsrc:
             buf = Gst.Buffer.new_allocate(None, len(data), None)
             buf.fill(0, data)
-
-            # FIX #4: Assign correct PTS and duration so the AAC encoder
-            # doesn't drift, produce glitches, or silently drop frames.
             buf.pts      = self._pts
             buf.duration = self._duration_per_chunk
             self._pts   += self._duration_per_chunk
-
             ret = appsrc.emit("push-buffer", buf)
             if ret != Gst.FlowReturn.OK:
                 print(f"[GST EGRESS] push-buffer returned: {ret}")
@@ -158,22 +225,11 @@ class AudioBridge:
     # ── Pipeline construction ──────────────────────────────────────────────────
 
     def build_pipelines(self):
-        """
-        FIX #2: Two separate pipelines instead of one malformed parse_launch string.
-
-        Gst.parse_launch() cannot manage two disconnected source chains in a
-        single string. The original code joined them with a space, which GStreamer
-        treats as a link operator — creating an invalid graph that fails silently
-        or raises a parse error at runtime.
-
-        Pipeline A (ingress): srtsrc → MPEG-TS demux → AAC decode → appsink
-        Pipeline B (egress):  appsrc → AAC encode → MPEG-TS mux → srtclientsink
-        """
-
         ingress_str = (
             f"srtsrc uri=\"{SRT_INGRESS_URL}\" "
             "wait-for-connection=true "
-            "poll-timeout=100 ! "
+            "poll-timeout=100 "
+            "do-timestamp=true ! "
             "decodebin ! "
             "audioconvert ! audioresample ! "
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
@@ -192,79 +248,87 @@ class AudioBridge:
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             "mpegtsmux ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\""
-    )
+        )
 
         self.ingress_pipeline = Gst.parse_launch(ingress_str)
         self.egress_pipeline  = Gst.parse_launch(egress_str)
 
-        # Wire the appsink callback
         appsink = self.ingress_pipeline.get_by_name("sink_in")
         appsink.connect("new-sample", self.on_new_sample)
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────────
-
-    async def start(self):
-        # FIX #3: Capture the running loop HERE, not in __init__
-        self.loop  = asyncio.get_running_loop()
-        # Increased from 20 to 200 — prevents QueueFull exceptions
-        # during w-okada processing bursts
-        self.queue = asyncio.Queue(maxsize=200)
-
-        self.build_pipelines()
-        await self.connect_websocket()
-
-        # Watch for pipeline errors and restart on disconnect
+        # Watch for pipeline errors and EOS to handle Larix reconnects
         for pipeline in [self.ingress_pipeline, self.egress_pipeline]:
             bus = pipeline.get_bus()
             bus.add_signal_watch()
             bus.connect("message::error", self.on_pipeline_error)
-            bus.connect("message::eos", self.on_pipeline_eos)
+            bus.connect("message::eos",   self.on_pipeline_eos)
 
-        self.ingress_pipeline.set_state(Gst.State.PLAYING)
-        self.egress_pipeline.set_state(Gst.State.PLAYING)
-        print("[GST] Both pipelines are PLAYING.")
-        print(f"[GST] Listening for SRT on: {SRT_INGRESS_URL}")
-        print(f"[GST] Sending processed audio to: {SRT_EGRESS_URL}")
-
-        await self.process_loop()
+    # ── Pipeline event handlers ────────────────────────────────────────────────
 
     def on_pipeline_error(self, bus, message):
         err, debug = message.parse_error()
-        print(f"[GST ERROR] {err.message}. Restarting pipeline...")
-        self.loop.call_soon_threadsafe(
-            self.loop.create_task,
-            self.restart_ingress()
-        )
+        print(f"[GST ERROR] {err.message}. Restarting ingress...")
+        if self.loop and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(
+                self.loop.create_task, self.restart_ingress()
+            )
 
     def on_pipeline_eos(self, bus, message):
-        print("[GST] End of stream detected. Restarting ingress...")
-        self.loop.call_soon_threadsafe(
-            self.loop.create_task,
-            self.restart_ingress()
-        )
+        print("[GST] End of stream. Restarting ingress...")
+        if self.loop and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(
+                self.loop.create_task, self.restart_ingress()
+            )
 
     async def restart_ingress(self):
-        """Restarts the ingress pipeline to accept a new SRT connection."""
         print("[GST] Restarting ingress pipeline...")
         if self.ingress_pipeline:
             self.ingress_pipeline.set_state(Gst.State.NULL)
             await asyncio.sleep(1)
             self.ingress_pipeline.set_state(Gst.State.PLAYING)
-            print("[GST] Ingress pipeline restarted.")
+            print("[GST] Ingress pipeline restarted. Waiting for Larix...")
+
+    async def watchdog_loop(self):
+        """Periodically checks ingress state and restarts if stalled."""
+        while True:
+            await asyncio.sleep(15)
+            if self.ingress_pipeline:
+                state = self.ingress_pipeline.get_state(0)[1]
+                if state != Gst.State.PLAYING:
+                    print("[WATCHDOG] Ingress not PLAYING. Restarting...")
+                    await self.restart_ingress()
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    async def start(self):
+        self.loop          = asyncio.get_running_loop()
+        self.queue         = asyncio.Queue(maxsize=200)
+        self.response_queue = asyncio.Queue(maxsize=10)
+
+        self.build_pipelines()
+        await self.connect_socketio()
+
+        self.ingress_pipeline.set_state(Gst.State.PLAYING)
+        self.egress_pipeline.set_state(Gst.State.PLAYING)
+        print("[GST] Both pipelines are PLAYING.")
+        print(f"[GST] Listening for SRT on:        {SRT_INGRESS_URL}")
+        print(f"[GST] Sending processed audio to:  {SRT_EGRESS_URL}")
+        print(f"[SIO] Sending audio to w-okada at: {WOKADA_HTTP_URL}{WOKADA_NAMESPACE}")
+
+        await asyncio.gather(
+            self.process_loop(),
+            self.watchdog_loop(),
+        )
 
     def stop(self):
-        print("[MAVIS] Stopping pipelines...")
+        print("[MAVIS] Stopping...")
         if self.ingress_pipeline:
             self.ingress_pipeline.set_state(Gst.State.NULL)
         if self.egress_pipeline:
             self.egress_pipeline.set_state(Gst.State.NULL)
-
-        # FIX #5: Cannot call asyncio.create_task() from a signal handler.
-        # Use call_soon_threadsafe to schedule coroutine cleanup safely.
-        if self.ws_session and self.loop and not self.loop.is_closed():
+        if self.sio and self.loop and not self.loop.is_closed():
             self.loop.call_soon_threadsafe(
-                self.loop.create_task,
-                self.ws_session.close()
+                self.loop.create_task, self.sio.disconnect()
             )
 
 
