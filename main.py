@@ -215,9 +215,13 @@ class AudioBridge:
         if appsrc:
             buf = Gst.Buffer.new_allocate(None, len(data), None)
             buf.fill(0, data)
-            buf.pts      = self._pts
-            buf.duration = self._duration_per_chunk
-            self._pts   += self._duration_per_chunk
+            if self._duration_per_chunk > 0:
+                buf.pts      = self._pts
+                buf.duration = self._duration_per_chunk
+                self._pts   += self._duration_per_chunk
+            else:
+                buf.pts      = Gst.CLOCK_TIME_NONE
+                buf.duration = Gst.CLOCK_TIME_NONE
             ret = appsrc.emit("push-buffer", buf)
             if ret != Gst.FlowReturn.OK:
                 print(f"[GST EGRESS] push-buffer returned: {ret}")
