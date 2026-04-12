@@ -25,7 +25,7 @@ gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstApp, GLib
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
-SRT_INGRESS_URL = "srt://0.0.0.0:6000?mode=listener&latency=200"
+SRT_INGRESS_URL = "srt://0.0.0.0:6000?mode=listener&latency=200&pbkeylen=0"
 SRT_EGRESS_URL = "srt://0.0.0.0:6001?mode=listener&latency=200"
 
 # FIX #1: Was "s://..." (missing the 'w'). This caused a connection error on every start.
@@ -171,14 +171,16 @@ class AudioBridge:
         """
 
         ingress_str = (
-            f"srtsrc uri=\"{SRT_INGRESS_URL}\" reuse=true ! "
-            "decodebin name=decoder ! "
+            f"srtsrc uri=\"{SRT_INGRESS_URL}\" "
+            "wait-for-connection=true "
+            "poll-timeout=100 ! "
+            "decodebin ! "
             "audioconvert ! audioresample ! "
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             f"{AUDIO_CAPS} ! "
             "appsink name=sink_in emit-signals=true sync=false "
             "max-buffers=2 drop=true"
-    )
+        )
 
         egress_str = (
             f"appsrc name=source_out format=time is-live=true "
