@@ -103,12 +103,11 @@ RUN pip3 install --no-cache-dir \
     gradio
 
 # Step 3b: Install packages that require GitHub source installs
-# fcpe is not on PyPI — must come from GitHub
-RUN pip3 install --no-cache-dir \
+# Force reinstall torchfcpe to get latest version including f02midi module
+RUN pip3 install --no-cache-dir --force-reinstall \
     git+https://github.com/CNChTu/FCPE.git \
-    || pip3 install --no-cache-dir \
-    git+https://github.com/gudgud96/frechet-audio-distance.git \
-    || echo "WARNING: fcpe install failed — f0 detection may fall back to alternative"
+    && echo "torchfcpe installed successfully" \
+    || echo "WARNING: fcpe install failed"
 
 # Step 4: fairseq from source
 
