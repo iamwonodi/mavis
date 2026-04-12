@@ -68,32 +68,29 @@ divider
 # =============================================================================
 log "Checking NVIDIA drivers..."
 
-if command -v nvidia-smi >/dev/null 2>&1; then
+# Test nvidia-smi actually works, not just that it exists
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     skip "NVIDIA drivers"
     nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 else
-    log "NVIDIA drivers not found. Detecting and installing..."
-
+    log "NVIDIA drivers not working or missing. Installing..."
+    # Remove any broken existing installation first
+    apt-get remove --purge -y 'nvidia-*' 'libnvidia-*' 2>/dev/null || true
+    apt-get autoremove -y
+    apt-get update -y
     apt-get install -y ubuntu-drivers-common
-
     RECOMMENDED=$(ubuntu-drivers devices 2>/dev/null \
         | grep recommended \
         | awk '{print $3}' \
         | head -1)
-
     if [ -z "$RECOMMENDED" ]; then
-        warn "Could not auto-detect driver. Falling back to nvidia-driver-525."
-        RECOMMENDED="nvidia-driver-525"
+        warn "Could not auto-detect driver. Falling back to nvidia-driver-535."
+        RECOMMENDED="nvidia-driver-535"
     fi
-
     log "Installing: ${RECOMMENDED}"
     apt-get install -y "$RECOMMENDED"
-
-    # Install matching nvidia-utils so nvidia-smi is available
     UTILS_PKG=$(echo "$RECOMMENDED" | sed 's/nvidia-driver/nvidia-utils/')
-    apt-get install -y "$UTILS_PKG" || apt-get install -y nvidia-utils-525
-
-    log "NVIDIA drivers installed."
+    apt-get install -y "$UTILS_PKG" || apt-get install -y nvidia-utils-535
     REBOOT_REQUIRED=true
 fi
 divider
