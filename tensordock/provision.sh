@@ -218,6 +218,16 @@ log "Checking Mavis deployment infrastructure..."
 
 [ -d "/opt/mavis" ] && skip "/opt/mavis directory" || { mkdir -p /opt/mavis; log "Created /opt/mavis"; }
 
+# Create persistent volume directory for w-okada model files
+# This survives container restarts so models never need redownloading
+if [ -d "/home/${ACTUAL_USER}/wokada-models" ]; then
+    skip "wokada-models directory"
+else
+    mkdir -p "/home/${ACTUAL_USER}/wokada-models"
+    chown "${ACTUAL_USER}:${ACTUAL_USER}" "/home/${ACTUAL_USER}/wokada-models"
+    log "Created /home/${ACTUAL_USER}/wokada-models for persistent model storage"
+fi
+
 if [ ! -f "/var/log/mavis-deploy.log" ]; then
     touch /var/log/mavis-deploy.log
     log "Created /var/log/mavis-deploy.log"

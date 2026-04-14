@@ -43,6 +43,11 @@ RUN pip3 install --no-cache-dir \
     torchaudio==2.0.2+cu118 \
     --index-url https://download.pytorch.org/whl/cu118
 
+# FIX: Pin numpy explicitly — prevents version conflicts from downstream installs
+# Must come immediately after PyTorch before anything else can pull a newer numpy
+RUN pip3 install --no-cache-dir "numpy==1.23.5"
+
+
 # ONNX Runtime GPU (pinned for w-okada compatibility)
 RUN pip3 install --no-cache-dir onnxruntime-gpu==1.13.1
 
@@ -69,7 +74,10 @@ RUN pip3 install --no-cache-dir \
     "pyOpenSSL==21.0.0" \
     "cryptography==38.0.4"
 
-RUN pip3 install --no-cache-dir python-socketio[asyncio_client] aiohttp
+# FIX: Install python-socketio with asyncio_client extra — required for
+# AsyncClient used in main.py to communicate with w-okada via Socket.IO
+RUN pip3 install --no-cache-dir "python-socketio[asyncio_client]"
+
 
 # ── Clone w-okada voice changer ───────────────────────────────────────────────
 WORKDIR /workspace
@@ -102,11 +110,11 @@ RUN pip3 install --no-cache-dir \
     rotary-embedding-torch \
     gradio
 
-# Step 3b: Install packages that require GitHub source installs
-# Force reinstall torchfcpe to get latest version including f02midi module
-RUN pip3 install --no-cache-dir --force-reinstall \
-    git+https://github.com/CNChTu/FCPE.git \
-    && echo "torchfcpe installed successfully" \
+# Step 3b: torchfcpe — pinned to 0.0.3 which is the last stable version
+# DO NOT upgrade to 0.0.4 — it introduced f02midi which is not properly
+# packaged and causes ModuleNotFoundError at w-okada startup
+RUN pip3 install --no-cache-dir "torchfcpe==0.0.3" \
+    && echo "torchfcpe 0.0.3 installed successfully" \
     || echo "WARNING: fcpe install failed"
 
 # Step 4: fairseq from source
@@ -127,15 +135,25 @@ RUN pip3 install --no-cache-dir \
     "hydra-core==1.1.2" \
     && echo "fairseq runtime deps installed"
 
+# FIX: Re-pin numpy after all installs — some packages above may have
+# pulled a newer incompatible numpy version
+RUN pip3 install --no-cache-dir "numpy==1.23.5" \
+    && echo "numpy re-pinned to 1.23.5"
+
+
 # Step 5: Verify critical imports are resolvable at build time
 # If any of these fail the Docker build itself fails, catching
 # missing dependencies before the image is ever pushed to ECR.
 RUN python3 -c "import torch; print('torch OK:', torch.__version__)"
+RUN python3 -c "import numpy; print('numpy OK:', numpy.__version__)"
 RUN python3 -c "import librosa; print('librosa OK')"
 RUN python3 -c "import fairseq; print('fairseq OK')" \
     || echo "WARNING: fairseq not importable — check build logs"
 RUN python3 -c "import pyworld; print('pyworld OK')"
 RUN python3 -c "import torchcrepe; print('torchcrepe OK')"
+RUN python3 -c "import torchfcpe; print('torchfcpe OK:', torchfcpe.__version__)"
+RUN python3 -c "import socketio; print('socketio OK')"
+
 
 
 # ── Copy Mavis application files ──────────────────────────────────────────────

@@ -82,6 +82,7 @@ docker run -d \
     --log-driver json-file \
     --log-opt max-size=50m \
     --log-opt max-file=3 \
+    -v /home/user/wokada-models:/workspace/voice-changer/server/model_dir \
     "$IMAGE_URI"
 
 # ── Health check ──────────────────────────────────────────────────────────────
