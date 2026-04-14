@@ -151,7 +151,7 @@ RUN python3 -c "import fairseq; print('fairseq OK')" \
     || echo "WARNING: fairseq not importable — check build logs"
 RUN python3 -c "import pyworld; print('pyworld OK')"
 RUN python3 -c "import torchcrepe; print('torchcrepe OK')"
-RUN python3 -c "import torchfcpe; print('torchfcpe OK:', torchfcpe.__version__)"
+RUN python3 -c "import torchfcpe; print('torchfcpe OK')"
 RUN python3 -c "import socketio; print('socketio OK')"
 
 
