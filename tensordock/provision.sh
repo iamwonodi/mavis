@@ -64,33 +64,49 @@ divider
 
 # =============================================================================
 # STEP 2 — NVIDIA Drivers + nvidia-smi
-# Auto-detects recommended driver. Skips if already present.
+# Auto-detects recommended driver. Skips if already working.
 # =============================================================================
 log "Checking NVIDIA drivers..."
 
-# Test nvidia-smi actually works, not just that it exists
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     skip "NVIDIA drivers"
     nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 else
     log "NVIDIA drivers not working or missing. Installing..."
+
     # Remove any broken existing installation first
     apt-get remove --purge -y 'nvidia-*' 'libnvidia-*' 2>/dev/null || true
     apt-get autoremove -y
+
+    # Clean any leftover CUDA repo configs that can interfere
+    rm -f /etc/apt/sources.list.d/cuda*.list
     apt-get update -y
+
+    # Install the driver detection tool
     apt-get install -y ubuntu-drivers-common
-    RECOMMENDED=$(ubuntu-drivers devices 2>/dev/null \
-        | grep recommended \
-        | awk '{print $3}' \
-        | head -1)
-    if [ -z "$RECOMMENDED" ]; then
-        warn "Could not auto-detect driver. Falling back to nvidia-driver-535."
-        RECOMMENDED="nvidia-driver-535"
+
+    # Use autoinstall — it detects and installs the correct driver internally
+    # without needing to parse its output, which is what was failing before
+    log "Running ubuntu-drivers autoinstall..."
+    ubuntu-drivers autoinstall
+
+    # Verify nvidia-smi is now present after install
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        # autoinstall succeeded but nvidia-smi binary may be in a
+        # non-standard path — install the utils package explicitly
+        DRIVER_VERSION=$(dpkg -l 2>/dev/null \
+            | grep 'nvidia-driver-' \
+            | awk '{print $2}' \
+            | grep -oP '\d+' \
+            | head -1)
+        if [ -n "$DRIVER_VERSION" ]; then
+            apt-get install -y "nvidia-utils-${DRIVER_VERSION}" \
+                || apt-get install -y nvidia-utils-535
+        else
+            apt-get install -y nvidia-utils-535
+        fi
     fi
-    log "Installing: ${RECOMMENDED}"
-    apt-get install -y "$RECOMMENDED"
-    UTILS_PKG=$(echo "$RECOMMENDED" | sed 's/nvidia-driver/nvidia-utils/')
-    apt-get install -y "$UTILS_PKG" || apt-get install -y nvidia-utils-535
+
     REBOOT_REQUIRED=true
 fi
 divider
