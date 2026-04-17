@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import numpy as np
+import struct
 """
 Mavis — Real-Time AI Voice Conversion Bridge
 SRT In → w-okada Voice Changer (Socket.IO) → SRT Out
@@ -190,7 +192,9 @@ class AudioBridge:
                             timeout=1.0
                         )
                         if response is not None and len(response) > 0:
-                            self.push_to_egress(response)
+                            # Resample from model rate (40000Hz) to pipeline rate (48000Hz)
+                            resampled = self.resample_response(response, 40000, SAMPLE_RATE)
+                            self.push_to_egress(resampled)
                             print(f"[BRIDGE] Converted chunk {ts} pushed to egress.")
                         else:
                             # w-okada returned empty — no model active, bypass
@@ -206,6 +210,21 @@ class AudioBridge:
             else:
                 # Bypass if not connected to w-okada
                 self.push_to_egress(chunk)
+
+    def resample_response(self, data: bytes, from_rate: int, to_rate: int) -> bytes:
+        """Resample audio data from w-okada's native rate to pipeline rate."""
+        if from_rate == to_rate:
+            return data
+        # Unpack int16 samples
+        n_samples = len(data) // 2
+        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        # Resample
+        duration = n_samples / from_rate
+        new_n_samples = int(duration * to_rate)
+        indices = np.linspace(0, n_samples - 1, new_n_samples)
+        resampled = np.interp(indices, np.arange(n_samples), samples)
+        # Pack back to int16
+        return resampled.astype(np.int16).tobytes()
 
     # ── Egress push ────────────────────────────────────────────────────────────
 
@@ -289,13 +308,16 @@ class AudioBridge:
         if self.ingress_pipeline:
             self.ingress_pipeline.set_state(Gst.State.NULL)
             await asyncio.sleep(1)
+            # Reset timestamps so egress starts clean after reconnect
+            self._pts = 0
+            self._duration_per_chunk = 0
             self.ingress_pipeline.set_state(Gst.State.PLAYING)
             print("[GST] Ingress pipeline restarted. Waiting for Larix...")
 
     async def watchdog_loop(self):
         """Periodically checks ingress state and restarts if stalled."""
         while True:
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
             if self.ingress_pipeline:
                 state = self.ingress_pipeline.get_state(0)[1]
                 if state != Gst.State.PLAYING:

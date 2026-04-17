@@ -53,6 +53,39 @@ wait_for_wokada() {
     done
 }
 
+load_model() {
+    log "Loading voice model into w-okada slot 0..."
+    cd "$WOKADA_DIR" || return
+
+    mkdir -p upload_dir
+
+    # Only download if not already present in upload_dir
+    if [ ! -f "upload_dir/kikoto_mahiro_v2_40k_simple.onnx" ]; then
+        log "Downloading kikoto_mahiro model..."
+        wget -q "https://huggingface.co/wok000/vcclient_model/resolve/main/rvc_v2_alpha/kikoto_mahiro/kikoto_mahiro_v2_40k_simple.onnx" \
+            -O upload_dir/kikoto_mahiro_v2_40k_simple.onnx \
+            && log "Model downloaded." \
+            || { log "WARNING: Model download failed."; return; }
+    else
+        log "Model already in upload_dir. Skipping download."
+    fi
+
+    curl -s -X POST http://localhost:18888/load_model \
+        -F "slot=0" \
+        -F "isHalf=false" \
+        -F 'params={"voiceChangerType":"RVC","slot":0,"isSampleMode":false,"sampleId":"","files":[{"name":"kikoto_mahiro_v2_40k_simple.onnx","kind":"rvcModel","dir":""}],"params":{}}' \
+        > /dev/null 2>&1
+
+    curl -s -X POST http://localhost:18888/update_settings \
+        -F "key=modelSlotIndex" -F "val=0" > /dev/null 2>&1
+
+    curl -s -X POST http://localhost:18888/update_settings \
+        -F "key=gpu" -F "val=0" > /dev/null 2>&1
+
+    log "Voice model loaded and activated."
+    cd - > /dev/null
+}
+
 show_gpu() {
     log "GPU status:"
     nvidia-smi || log "nvidia-smi not found — ensure NVIDIA drivers are accessible."
@@ -79,6 +112,7 @@ start_wokada
 show_gpu
 show_wokada_logs
 wait_for_wokada
+load_model
 run_main
 
 log "=== Mavis Exited ==="
