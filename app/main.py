@@ -297,12 +297,12 @@ class AudioBridge:
         )
 
         egress_str = (
-            f"appsrc name=source_out format=time is-live=true "
-            f"do-timestamp=true "
+            f"appsrc name=source_out format=bytes is-live=true "
             f"caps=\"{AUDIO_CAPS}\" ! "
             "audioconvert ! "
             "avenc_aac bitrate=128000 ! "
             "aacparse ! "
+            "mpegtsmux ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\" "
             "wait-for-connection=false"
         )
