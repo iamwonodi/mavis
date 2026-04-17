@@ -128,27 +128,27 @@ RUN pip3 install --no-cache-dir "numpy==1.23.5" \
     && echo "numpy re-pinned to 1.23.5"
 
 # ── Bake in w-okada pretrain models ───────────────────────────────────────────
-# Downloading these at build time means w-okada starts instantly with no
-# network downloads at container startup. These are the neural network
-# weights required for voice feature extraction and pitch detection.
-# Without them w-okada cannot process any audio regardless of which
-# voice model is loaded.
+# Download w-okada pretrain models at build time
+# Uses retries to handle HuggingFace rate limiting on CI runners
+# || true ensures a download failure does not break the entire build —
+# w-okada will download missing models at first container startup instead
 RUN mkdir -p /workspace/voice-changer/server/pretrain && \
     cd /workspace/voice-changer/server/pretrain && \
-    echo "Downloading hubert_base.pt (voice feature extractor)..." && \
-    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt" \
-        -O hubert_base.pt && \
-    echo "Downloading rmvpe.pt (pitch detector)..." && \
-    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt" \
-        -O rmvpe.pt && \
-    echo "Downloading rmvpe.onnx (pitch detector ONNX)..." && \
-    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx" \
-        -O rmvpe.onnx && \
-    echo "Downloading content_vec_500.onnx (content vector)..." && \
-    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/content_vec_500.onnx" \
-        -O content_vec_500.onnx && \
-    echo "All pretrain models downloaded." && \
-    ls -lh .
+    echo "Downloading pretrain models..." && \
+    wget -q --tries=3 --waitretry=5 \
+        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt" \
+        -O hubert_base.pt || echo "WARNING: hubert_base.pt download failed" && \
+    wget -q --tries=3 --waitretry=5 \
+        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt" \
+        -O rmvpe.pt || echo "WARNING: rmvpe.pt download failed" && \
+    wget -q --tries=3 --waitretry=5 \
+        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx" \
+        -O rmvpe.onnx || echo "WARNING: rmvpe.onnx download failed" && \
+    wget -q --tries=3 --waitretry=5 \
+        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/content_vec_500.onnx" \
+        -O content_vec_500.onnx || echo "WARNING: content_vec_500.onnx download failed" && \
+    echo "Pretrain download step complete." && \
+    ls -lh . || true
 
 # ── Build-time import verification ────────────────────────────────────────────
 # These checks fail the build immediately if any critical package is broken
