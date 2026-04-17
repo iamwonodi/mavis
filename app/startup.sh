@@ -49,7 +49,7 @@ wait_for_wokada() {
     log "Verifying w-okada WebSocket is reachable on port $WOKADA_PORT..."
     local retries=23
     while [ $retries -gt 0 ]; do
-        if nc -z localhost "$WOKADA_PORT" 2>/dev/null; then
+        if (echo > /dev/tcp/localhost/$WOKADA_PORT) 2>/dev/null; then
             log "w-okada is ready on port $WOKADA_PORT."
             return 0
         fi

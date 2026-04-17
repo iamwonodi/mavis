@@ -58,6 +58,8 @@ class AudioBridge:
 
         self._timestamp = 0
 
+        self._caller_ever_connected = False
+
 
         # Prevent concurrent restarts
         self._restarting = False
@@ -149,6 +151,7 @@ class AudioBridge:
         GStreamer signal — fires on GStreamer thread.
         The unused parameter is required by GStreamer's signal signature.
         """
+        self._caller_ever_connected = True
         print("[SRT] Caller connected. Audio conversion active.")
 
     def on_caller_removed(self, element, socket, unused):
@@ -382,14 +385,15 @@ class AudioBridge:
 
     async def watchdog_loop(self):
         """
-        Fallback watchdog — only fires if pipeline leaves PLAYING state
-        for reasons other than normal caller disconnection.
-        Normal disconnections are handled by the caller-removed signal.
-        Runs every 10 seconds as a light safety net only and should rarely if ever fire in practice.
+        Fallback safety net — only restarts if pipeline leaves PLAYING state
+        AFTER at least one caller has connected.
+        Before any caller connects the pipeline is legitimately idle waiting —
+        restarting it in that state causes an SRT library segfault.
         """
+        await asyncio.sleep(30)  # Never fire in the first 30 seconds
         while True:
             await asyncio.sleep(10)
-            if self.ingress_pipeline:
+            if self.ingress_pipeline and self._caller_ever_connected:
                 state = self.ingress_pipeline.get_state(0)[1]
                 if state != Gst.State.PLAYING:
                     print("[WATCHDOG] Ingress not PLAYING unexpectedly. Restarting...")
