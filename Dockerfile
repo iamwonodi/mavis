@@ -1,22 +1,19 @@
 # =============================================================================
 # Mavis — Real-Time AI Voice Conversion Bridge
 # Base: NVIDIA CUDA 11.8 + Ubuntu 22.04
-# Compatible with TensorDock KVM instances (RTX 4090 / GPU passthrough)
 # =============================================================================
 
 FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
 
-# Prevent interactive prompts during apt installs
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV GST_DEBUG=2
 
-# ── System: GStreamer, Python, build tools ─────────────────────────────────────
+# ── System dependencies ────────────────────────────────────────────────────────
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     git wget curl nano lsof build-essential pkg-config \
     ffmpeg libportaudio2 portaudio19-dev \
-    # GStreamer full stack
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
@@ -29,29 +26,26 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     python3-gi-cairo \
     libgirepository1.0-dev \
     libcairo2-dev \
-    # psmisc provides fuser (used by smart-cleanup.sh)
     psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Python deps ───────────────────────────────────────────────────────────────
+# ── Python base ────────────────────────────────────────────────────────────────
 RUN pip3 install --upgrade pip setuptools wheel
 
-# PyTorch + CUDA 11.8 (w-okada compatible)
+# PyTorch + CUDA 11.8
 RUN pip3 install --no-cache-dir \
     torch==2.0.1+cu118 \
     torchvision==0.15.2+cu118 \
     torchaudio==2.0.2+cu118 \
     --index-url https://download.pytorch.org/whl/cu118
 
-# FIX: Pin numpy explicitly — prevents version conflicts from downstream installs
-# Must come immediately after PyTorch before anything else can pull a newer numpy
+# Pin numpy immediately after PyTorch before anything else can change it
 RUN pip3 install --no-cache-dir "numpy==1.23.5"
 
-
-# ONNX Runtime GPU (pinned for w-okada compatibility)
+# ONNX Runtime GPU
 RUN pip3 install --no-cache-dir onnxruntime-gpu==1.13.1
 
-# aiohttp for WebSocket bridge; all w-okada Python deps
+# Core application and w-okada Python dependencies
 RUN pip3 install --no-cache-dir \
     aiohttp \
     sounddevice \
@@ -65,7 +59,6 @@ RUN pip3 install --no-cache-dir \
     scikit-learn \
     soundfile \
     python-engineio \
-    python-socketio \
     starlette \
     "fastapi<0.100.0" \
     uvicorn \
@@ -74,26 +67,24 @@ RUN pip3 install --no-cache-dir \
     "pyOpenSSL==21.0.0" \
     "cryptography==38.0.4"
 
-# FIX: Install python-socketio with asyncio_client extra — required for
-# AsyncClient used in main.py to communicate with w-okada via Socket.IO
+# python-socketio with asyncio_client extra — required by main.py
 RUN pip3 install --no-cache-dir "python-socketio[asyncio_client]"
 
-
-# ── Clone w-okada voice changer ───────────────────────────────────────────────
+# ── Clone w-okada ──────────────────────────────────────────────────────────────
 WORKDIR /workspace
 RUN git clone https://github.com/w-okada/voice-changer.git /workspace/voice-changer
 
-# ── w-okada dependencies — complete install ───────────────────────────────────
+# ── w-okada Python dependencies ───────────────────────────────────────────────
 
-# Step 1: Install w-okada's pinned requirements without deps first
+# Step 1: Install without deps to respect pinned versions
 RUN pip3 install --no-cache-dir --no-deps \
     -r /workspace/voice-changer/server/requirements.txt || true
 
-# Step 2: Install with deps to fill all transitive requirements
+# Step 2: Install with deps to fill transitive requirements
 RUN pip3 install --no-cache-dir \
     -r /workspace/voice-changer/server/requirements.txt || true
 
-# Step 3a: Install known lazy-loaded dependencies
+# Step 3a: Lazy-loaded dependencies
 RUN pip3 install --no-cache-dir \
     audioread \
     librosa \
@@ -110,22 +101,19 @@ RUN pip3 install --no-cache-dir \
     rotary-embedding-torch \
     gradio
 
-# Step 3b: torchfcpe — pinned to 0.0.3 which is the last stable version
-# DO NOT upgrade to 0.0.4 — it introduced f02midi which is not properly
-# packaged and causes ModuleNotFoundError at w-okada startup
+# Step 3b: torchfcpe pinned to 0.0.3 — last stable version
+# DO NOT upgrade to 0.0.4 — it introduced f02midi which is not
+# properly packaged and causes ModuleNotFoundError at w-okada startup
 RUN pip3 install --no-cache-dir "torchfcpe==0.0.3" \
-    && echo "torchfcpe 0.0.3 installed successfully" \
-    || echo "WARNING: fcpe install failed"
+    && echo "torchfcpe 0.0.3 installed successfully"
 
-# Step 4: fairseq from source
-
+# Step 4: fairseq from source with --no-deps to avoid version conflicts
 RUN pip3 install --no-cache-dir --no-deps \
     git+https://github.com/facebookresearch/fairseq.git@main \
     && echo "fairseq installed successfully" \
     || echo "WARNING: fairseq GitHub install failed"
 
-# Install fairseq's remaining runtime dependencies manually
-# since we used --no-deps above
+# fairseq manual runtime deps
 RUN pip3 install --no-cache-dir \
     sacrebleu \
     bitarray \
@@ -135,15 +123,36 @@ RUN pip3 install --no-cache-dir \
     "hydra-core==1.1.2" \
     && echo "fairseq runtime deps installed"
 
-# FIX: Re-pin numpy after all installs — some packages above may have
-# pulled a newer incompatible numpy version
+# Re-pin numpy after all installs to ensure nothing pulled a newer version
 RUN pip3 install --no-cache-dir "numpy==1.23.5" \
     && echo "numpy re-pinned to 1.23.5"
 
+# ── Bake in w-okada pretrain models ───────────────────────────────────────────
+# Downloading these at build time means w-okada starts instantly with no
+# network downloads at container startup. These are the neural network
+# weights required for voice feature extraction and pitch detection.
+# Without them w-okada cannot process any audio regardless of which
+# voice model is loaded.
+RUN mkdir -p /workspace/voice-changer/server/pretrain && \
+    cd /workspace/voice-changer/server/pretrain && \
+    echo "Downloading hubert_base.pt (voice feature extractor)..." && \
+    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt" \
+        -O hubert_base.pt && \
+    echo "Downloading rmvpe.pt (pitch detector)..." && \
+    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt" \
+        -O rmvpe.pt && \
+    echo "Downloading rmvpe.onnx (pitch detector ONNX)..." && \
+    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx" \
+        -O rmvpe.onnx && \
+    echo "Downloading content_vec_500.onnx (content vector)..." && \
+    wget -q "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/content_vec_500.onnx" \
+        -O content_vec_500.onnx && \
+    echo "All pretrain models downloaded." && \
+    ls -lh .
 
-# Step 5: Verify critical imports are resolvable at build time
-# If any of these fail the Docker build itself fails, catching
-# missing dependencies before the image is ever pushed to ECR.
+# ── Build-time import verification ────────────────────────────────────────────
+# These checks fail the build immediately if any critical package is broken
+# so we never push a broken image to ECR
 RUN python3 -c "import torch; print('torch OK:', torch.__version__)"
 RUN python3 -c "import numpy; print('numpy OK:', numpy.__version__)"
 RUN python3 -c "import librosa; print('librosa OK')"
@@ -154,29 +163,20 @@ RUN python3 -c "import torchcrepe; print('torchcrepe OK')"
 RUN python3 -c "import torchfcpe; print('torchfcpe OK')"
 RUN python3 -c "import socketio; print('socketio OK')"
 
-
-
 # ── Copy Mavis application files ──────────────────────────────────────────────
 WORKDIR /workspace/mavis
 
-# App layer
-COPY main.py        ./scripts/main.py
-COPY startup.sh        ./startup.sh
-
-# Setup scripts (available inside container for reference/re-runs)
-COPY smart-cleanup.sh ./scripts/smart-cleanup.sh
+# FIX: Correct COPY paths with subdirectory prefixes
+COPY app/main.py             ./scripts/main.py
+COPY app/startup.sh          ./startup.sh
+COPY app/smart-cleanup.sh ./scripts/smart-cleanup.sh
 
 RUN chmod +x ./startup.sh ./scripts/smart-cleanup.sh
 
-# ── Expose ports ──────────────────────────────────────────────────────────────
-# SRT ingress (audio in from Larix / OBS)
+# ── Ports ──────────────────────────────────────────────────────────────────────
 EXPOSE 6000/udp
-# SRT egress (processed audio out)
 EXPOSE 6001/udp
-# w-okada WebSocket API (internal, but exposed for debugging)
 EXPOSE 18888/tcp
 
-# ── Entrypoint ────────────────────────────────────────────────────────────────
-# Runs w-okada in the background, then launches the GStreamer pipeline
-# foreground. Ctrl-C stops the pipeline; w-okada keeps running.
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
 CMD ["/bin/bash", "/workspace/mavis/startup.sh"]

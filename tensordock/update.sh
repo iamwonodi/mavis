@@ -2,9 +2,9 @@
 # =============================================================================
 # /opt/mavis/update.sh
 # Called by GitHub Actions over SSH on every successful ECR push.
-# Pulls the new image, stops the old container gracefully, starts the new one.
+# Pulls the latest image, stops the old container gracefully, starts the new one.
 #
-# Usage: ./update.sh <ecr-registry/repo> <version-tag> <aws-region>
+# Usage: bash update.sh <ecr-registry/repo> <version-tag> <aws-region>
 # =============================================================================
 
 set -euo pipefail
@@ -82,7 +82,7 @@ docker run -d \
     --log-driver json-file \
     --log-opt max-size=50m \
     --log-opt max-file=3 \
-    -v /home/user/wokada-models:/workspace/voice-changer/server/model_dir \
+    -v /home/user/wokada-models:/workspace/voice-changer/server/upload_dir \
     "$IMAGE_URI"
 
 # ── Health check ──────────────────────────────────────────────────────────────
