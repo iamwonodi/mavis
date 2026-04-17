@@ -300,13 +300,9 @@ class AudioBridge:
             f"appsrc name=source_out format=time is-live=true "
             f"do-timestamp=true "
             f"caps=\"{AUDIO_CAPS}\" ! "
-            "queue max-size-buffers=0 max-size-time=500000000 max-size-bytes=0 leaky=downstream ! "
             "audioconvert ! "
             "avenc_aac bitrate=128000 ! "
             "aacparse ! "
-            "queue max-size-buffers=0 max-size-time=500000000 max-size-bytes=0 leaky=downstream ! "
-            "mpegtsmux alignment=7 ! "
-            "queue max-size-buffers=0 max-size-time=500000000 max-size-bytes=0 leaky=downstream ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\" "
             "wait-for-connection=false"
         )
