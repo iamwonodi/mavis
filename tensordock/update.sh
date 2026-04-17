@@ -83,6 +83,7 @@ docker run -d \
     --log-opt max-size=50m \
     --log-opt max-file=3 \
     -v /home/user/wokada-models:/workspace/voice-changer/server/upload_dir \
+    -v /home/user/wokada-pretrain:/workspace/voice-changer/server/pretrain \
     "$IMAGE_URI"
 
 # ── Health check ──────────────────────────────────────────────────────────────

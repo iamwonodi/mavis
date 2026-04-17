@@ -234,14 +234,27 @@ log "Checking Mavis deployment infrastructure..."
 
 [ -d "/opt/mavis" ] && skip "/opt/mavis directory" || { mkdir -p /opt/mavis; log "Created /opt/mavis"; }
 
-# Create persistent volume directory for w-okada model files
+# Create persistent volume directory for w-okada voice model files
+# Place main_*.onnx or default_*.onnx here to load voice models
 # This survives container restarts so models never need redownloading
 if [ -d "/home/${ACTUAL_USER}/wokada-models" ]; then
     skip "wokada-models directory"
 else
     mkdir -p "/home/${ACTUAL_USER}/wokada-models"
     chown "${ACTUAL_USER}:${ACTUAL_USER}" "/home/${ACTUAL_USER}/wokada-models"
-    log "Created /home/${ACTUAL_USER}/wokada-models for persistent model storage"
+    log "Created /home/${ACTUAL_USER}/wokada-models for persistent voice model storage"
+fi
+
+# Create persistent volume directory for w-okada pretrain models
+# hubert_base.pt, rmvpe.pt, rmvpe.onnx, content_vec_500.onnx etc.
+# w-okada downloads these automatically on first boot via huggingface_hub
+# On every subsequent boot they are already here — no re-download needed
+if [ -d "/home/${ACTUAL_USER}/wokada-pretrain" ]; then
+    skip "wokada-pretrain directory"
+else
+    mkdir -p "/home/${ACTUAL_USER}/wokada-pretrain"
+    chown "${ACTUAL_USER}:${ACTUAL_USER}" "/home/${ACTUAL_USER}/wokada-pretrain"
+    log "Created /home/${ACTUAL_USER}/wokada-pretrain for persistent pretrain model storage"
 fi
 
 if [ ! -f "/var/log/mavis-deploy.log" ]; then
@@ -264,7 +277,6 @@ else
     warn "update.sh not found next to provision.sh — copy it manually."
 fi
 divider
-
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
