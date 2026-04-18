@@ -298,6 +298,7 @@ class AudioBridge:
             "avenc_aac bitrate=128000 ! "
             "aacparse ! "
             "mpegtsmux ! "
+            "queue max-size-buffers=0 max-size-time=3000000000 max-size-bytes=0 ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\" "
         )
 
