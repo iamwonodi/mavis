@@ -4,17 +4,22 @@ Mavis — Real-Time AI Voice Conversion Bridge
 SRT In → w-okada Voice Changer (Socket.IO) → SRT Out
 
 Architecture:
-  - GStreamer srtsrc (port 6000) receives live audio from Larix/OBS
-  - Audio is decoded and sent to w-okada via Socket.IO (port 18888)
-  - w-okada performs RVC voice conversion and returns converted audio
-  - Converted audio is resampled from 40000Hz to 48000Hz
-  - Output is encoded as AAC/MPEG-TS and sent via SRT (port 6001) to OBS
+  - GStreamer srtsrc (port 6000) receives live audio from Larix
+  - Audio decoded and downsampled to 40000Hz (w-okada's native rate)
+  - Sent to w-okada via Socket.IO (port 18888)
+  - w-okada performs RVC voice conversion and returns 40000Hz audio
+  - No resampling needed — pipeline runs at 40000Hz end to end
+  - Output encoded as AAC/MPEG-TS and sent via SRT (port 6001) to OBS
+
+Timestamp approach:
+  - Uses sample counting for egress buffer timestamps
+  - PTS = cumulative_samples * Gst.SECOND // SAMPLE_RATE
+  - Always monotonically increasing regardless of processing latency
+  - Eliminates DTS going backward permanently
 
 Reconnection:
-  - Uses srtsrc caller-added/caller-removed GStreamer signals for exact
-    connection state detection — no polling, no silence false positives
-  - Ingress restarts only when the SRT TCP connection is actually severed
-  - Silence during speech never triggers a restart
+  - srtsrc caller-removed signal detects exact disconnection
+  - Silence never triggers a restart — only TCP disconnection does
 """
 
 import gi
@@ -34,12 +39,10 @@ SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=200"
 WOKADA_HTTP_URL  = "http://localhost:18888"
 WOKADA_NAMESPACE = "/test"
 
-AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved"
-SAMPLE_RATE = 48000
-
-# w-okada RVC model native output rate — must match the loaded model
-# kikoto_mahiro and all default sample models output at 40000Hz
-WOKADA_SAMPLE_RATE = 40000
+# w-okada RVC model native rate — pipeline runs at this rate end to end
+# No Python resampling needed — GStreamer handles ingress downsampling
+SAMPLE_RATE  = 40000
+AUDIO_CAPS   = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
 Gst.init(None)
 
@@ -58,11 +61,16 @@ class AudioBridge:
 
         self._timestamp = 0
 
-        self._caller_ever_connected = False
+        # Cumulative sample counter for egress timestamps
+        # PTS = _sample_count * Gst.SECOND // SAMPLE_RATE
+        # Always increases monotonically — eliminates DTS going backward
+        self._sample_count = 0
 
-
-        # Prevent concurrent restarts
+        # Guards against concurrent restart calls
         self._restarting = False
+
+        # Only allow watchdog to fire after a caller has connected
+        self._caller_ever_connected = False
 
     # ── Socket.IO connection ───────────────────────────────────────────────────
 
@@ -89,8 +97,8 @@ class AudioBridge:
         @self.sio.on("response", namespace=WOKADA_NAMESPACE)
         async def on_response(msg):
             """
-            w-okada response format: [timestamp, bin, perf]
-            bin = struct-packed int16 audio at WOKADA_SAMPLE_RATE
+            w-okada response: [timestamp, bin, perf]
+            bin = struct-packed int16 audio at SAMPLE_RATE (40000Hz)
             Returns integer 0 when no model is loaded.
             """
             try:
@@ -146,20 +154,14 @@ class AudioBridge:
     # ── SRT caller signal handlers ─────────────────────────────────────────────
 
     def on_caller_added(self, element, socket, unused):
-        """
-        Fires the instant an SRT caller connects.
-        GStreamer signal — fires on GStreamer thread.
-        The unused parameter is required by GStreamer's signal signature.
-        """
+        """Fires the instant an SRT caller connects."""
         self._caller_ever_connected = True
         print("[SRT] Caller connected. Audio conversion active.")
 
     def on_caller_removed(self, element, socket, unused):
         """
         Fires the instant an SRT caller disconnects.
-        GStreamer signal — fires on GStreamer thread.
-        Silence NEVER triggers this — only actual TCP disconnection does.
-        The unused parameter is required by GStreamer's signal signature.
+        Silence never triggers this — only actual TCP disconnection does.
         """
         print("[SRT] Caller disconnected. Scheduling ingress restart...")
         if self.loop and not self.loop.is_closed():
@@ -171,8 +173,9 @@ class AudioBridge:
 
     async def process_loop(self):
         """
-        Dequeues PCM audio chunks, sends to w-okada via Socket.IO,
-        receives converted audio, resamples, and pushes to egress.
+        Dequeues 40000Hz PCM chunks, sends to w-okada,
+        receives converted 40000Hz audio, pushes directly to egress.
+        No resampling needed — pipeline runs at 40000Hz end to end.
         """
         print("[BRIDGE] Processing loop active.")
         while True:
@@ -183,7 +186,7 @@ class AudioBridge:
                     self._timestamp += 1
                     ts = self._timestamp
 
-                    # Clear stale responses before sending new chunk
+                    # Discard stale responses before sending new chunk
                     while not self.response_queue.empty():
                         try:
                             self.response_queue.get_nowait()
@@ -202,12 +205,7 @@ class AudioBridge:
                             timeout=1.0
                         )
                         if response is not None and len(response) > 0:
-                            # Resample from w-okada model rate to pipeline rate
-                            # e.g. 40000Hz → 48000Hz
-                            resampled = self.resample_response(
-                                response, WOKADA_SAMPLE_RATE, SAMPLE_RATE
-                            )
-                            self.push_to_egress(resampled)
+                            self.push_to_egress(response)
                             print(f"[BRIDGE] Converted chunk {ts} pushed to egress.")
                         else:
                             print("[BRIDGE] w-okada returned empty. Is a model loaded?")
@@ -222,66 +220,62 @@ class AudioBridge:
             else:
                 self.push_to_egress(chunk)
 
-    # ── Audio resampling ───────────────────────────────────────────────────────
-
-    def resample_response(self, data: bytes, from_rate: int, to_rate: int) -> bytes:
-        """
-        Resample int16 PCM audio from from_rate to to_rate.
-
-        w-okada RVC models output at their native training rate (40000Hz).
-        The egress GStreamer pipeline expects 48000Hz (AUDIO_CAPS).
-        Without resampling, audio arrives too slow and at wrong pitch.
-
-        Uses linear interpolation — fast enough for real-time use.
-        """
-        if from_rate == to_rate:
-            return data
-        n_samples = len(data) // 2
-        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        new_n_samples = int(n_samples * to_rate / from_rate)
-        indices = np.linspace(0, n_samples - 1, new_n_samples)
-        resampled = np.interp(indices, np.arange(n_samples), samples)
-        return resampled.astype(np.int16).tobytes()
-
     # ── Egress push ────────────────────────────────────────────────────────────
 
     def push_to_egress(self, data: bytes):
         """
         Push audio bytes into the egress GStreamer pipeline.
 
-        Timestamps are intentionally NOT set (Gst.CLOCK_TIME_NONE).
-        The appsrc do-timestamp=true property handles timestamping using
-        the pipeline's own clock — this clock always moves forward and
-        never goes backward, eliminating the DTS going backward warning
-        and the audio corruption it causes.
+        Uses sample counting for timestamps instead of wall clock.
+        This guarantees timestamps always increase monotonically
+        regardless of how long w-okada takes to process each chunk.
+
+        How it works:
+          - n_samples = number of int16 samples in this chunk
+          - PTS = total_samples_pushed_so_far / sample_rate (in nanoseconds)
+          - Duration = samples_in_this_chunk / sample_rate (in nanoseconds)
+          - After pushing, advance the counter by n_samples
+
+        Example:
+          Chunk 1: 4000 samples → PTS=0ms,    duration=100ms, counter→4000
+          Chunk 2: 4000 samples → PTS=100ms,  duration=100ms, counter→8000
+          Chunk 3: 4000 samples → PTS=200ms,  duration=100ms, counter→12000
+
+        Each chunk starts exactly where the previous one ended.
+        The muxer sees a perfectly continuous stream — no DTS warnings.
         """
         appsrc = self.egress_pipeline.get_by_name("source_out")
-        if appsrc:
-            buf = Gst.Buffer.new_allocate(None, len(data), None)
-            buf.fill(0, data)
-            buf.pts      = Gst.CLOCK_TIME_NONE
-            buf.dts      = Gst.CLOCK_TIME_NONE
-            buf.duration = Gst.CLOCK_TIME_NONE
-            ret = appsrc.emit("push-buffer", buf)
-            if ret != Gst.FlowReturn.OK:
-                print(f"[GST EGRESS] push-buffer returned: {ret}")
+        if not appsrc:
+            return
+
+        n_samples = len(data) // 2  # S16LE = 2 bytes per sample
+        if n_samples == 0:
+            return
+
+        duration = (n_samples * Gst.SECOND) // SAMPLE_RATE
+
+        buf = Gst.Buffer.new_allocate(None, len(data), None)
+        buf.fill(0, data)
+        buf.pts      = (self._sample_count * Gst.SECOND) // SAMPLE_RATE
+        buf.dts      = buf.pts
+        buf.duration = duration
+
+        self._sample_count += n_samples
+
+        ret = appsrc.emit("push-buffer", buf)
+        if ret != Gst.FlowReturn.OK:
+            print(f"[GST EGRESS] push-buffer returned: {ret}")
 
     # ── Pipeline construction ──────────────────────────────────────────────────
 
     def build_pipelines(self):
         """
-        Builds two separate GStreamer pipelines.
+        Ingress: srtsrc → decodebin → audioresample to 40000Hz → appsink
+        Egress:  appsrc (40000Hz) → avenc_aac → aacparse → mpegtsmux → srtsink
 
-        Ingress: srtsrc → decodebin → audioconvert → audioresample → appsink
-        Egress:  appsrc (do-timestamp=true) → audioconvert → avenc_aac
-                 → mpegtsmux → srtsink
-
-        srtsrc named 'srtsrc0' explicitly so caller-added/caller-removed
-        signals can be wired reliably via get_by_name().
-
-        do-timestamp=true on appsrc means GStreamer stamps every buffer
-        using its own monotonically increasing pipeline clock — this is
-        what eliminates the DTS going backward error permanently.
+        Ingress downsamples from Larix's 48000Hz to 40000Hz so that
+        w-okada receives and returns audio at its native rate.
+        No Python resampling needed anywhere.
         """
         ingress_str = (
             f"srtsrc name=srtsrc0 uri=\"{SRT_INGRESS_URL}\" "
@@ -289,7 +283,8 @@ class AudioBridge:
             "poll-timeout=100 "
             "do-timestamp=true ! "
             "decodebin ! "
-            "audioconvert ! audioresample ! "
+            "audioconvert ! "
+            "audioresample ! "
             "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             f"{AUDIO_CAPS} ! "
             "appsink name=sink_in emit-signals=true sync=false "
@@ -297,7 +292,7 @@ class AudioBridge:
         )
 
         egress_str = (
-            f"appsrc name=source_out format=bytes is-live=true "
+            f"appsrc name=source_out format=time is-live=true "
             f"caps=\"{AUDIO_CAPS}\" ! "
             "audioconvert ! "
             "avenc_aac bitrate=128000 ! "
@@ -313,10 +308,8 @@ class AudioBridge:
         appsink = self.ingress_pipeline.get_by_name("sink_in")
         appsink.connect("new-sample", self.on_new_sample)
 
-        # Wire SRT caller signals for reliable disconnection detection
         self._wire_srtsrc_signals()
 
-        # Bus watchers as safety net for pipeline errors and EOS
         for pipeline in [self.ingress_pipeline, self.egress_pipeline]:
             bus = pipeline.get_bus()
             bus.add_signal_watch()
@@ -324,17 +317,13 @@ class AudioBridge:
             bus.connect("message::eos",   self.on_pipeline_eos)
 
     def _wire_srtsrc_signals(self):
-        """
-        Wire caller-added and caller-removed on srtsrc0.
-        Called at startup and after every ingress restart since signals
-        are lost when the pipeline transitions through NULL state.
-        """
+        """Wire caller-added and caller-removed signals on srtsrc0."""
         srtsrc = self.ingress_pipeline.get_by_name("srtsrc0")
         if srtsrc:
             srtsrc.connect("caller-added",   self.on_caller_added)
             srtsrc.connect("caller-removed", self.on_caller_removed)
         else:
-            print("[WARN] Could not find srtsrc0 — caller signals not wired.")
+            print("[WARN] srtsrc0 not found — caller signals not wired.")
 
     # ── Pipeline event handlers ────────────────────────────────────────────────
 
@@ -355,10 +344,9 @@ class AudioBridge:
 
     async def restart_ingress(self):
         """
-        Restarts the ingress pipeline to accept a new SRT connection.
-        Protected against concurrent calls with _restarting flag.
-        Re-wires srtsrc signals after restart so disconnection
-        detection continues working for all subsequent connections.
+        Restarts ingress pipeline to accept a new SRT connection.
+        Resets sample counter so egress timestamps start fresh.
+        Re-wires srtsrc signals after pipeline goes through NULL state.
         """
         if self._restarting:
             return
@@ -368,14 +356,8 @@ class AudioBridge:
             if self.ingress_pipeline:
                 self.ingress_pipeline.set_state(Gst.State.NULL)
                 await asyncio.sleep(1)
-
-                # Reset timestamps so egress timeline starts clean
-                self._pts = 0
-                self._duration_per_chunk = 0
-
-                # Re-wire caller signals — lost when pipeline goes NULL
+                self._sample_count = 0
                 self._wire_srtsrc_signals()
-
                 self.ingress_pipeline.set_state(Gst.State.PLAYING)
                 print("[GST] Ingress PLAYING. Waiting for new caller...")
         finally:
@@ -383,12 +365,12 @@ class AudioBridge:
 
     async def watchdog_loop(self):
         """
-        Fallback safety net — only restarts if pipeline leaves PLAYING state
-        AFTER at least one caller has connected.
-        Before any caller connects the pipeline is legitimately idle waiting —
-        restarting it in that state causes an SRT library segfault.
+        Fallback safety net — only fires after a caller has connected
+        and the pipeline subsequently leaves PLAYING state unexpectedly.
+        Runs every 10 seconds. Should rarely fire in practice since
+        caller-removed handles all normal disconnections.
         """
-        await asyncio.sleep(30)  # Never fire in the first 30 seconds
+        await asyncio.sleep(30)
         while True:
             await asyncio.sleep(10)
             if self.ingress_pipeline and self._caller_ever_connected:
@@ -413,7 +395,7 @@ class AudioBridge:
         print("[GST] Both pipelines are PLAYING.")
         print(f"[GST] Listening for SRT on:        {SRT_INGRESS_URL}")
         print(f"[GST] Sending processed audio to:  {SRT_EGRESS_URL}")
-        print(f"[SIO] Sending audio to w-okada at: {WOKADA_HTTP_URL}{WOKADA_NAMESPACE}")
+        print(f"[SIO] w-okada at:                  {WOKADA_HTTP_URL}{WOKADA_NAMESPACE}")
 
         await asyncio.gather(
             self.process_loop(),
