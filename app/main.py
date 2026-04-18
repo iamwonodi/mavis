@@ -35,7 +35,7 @@ from gi.repository import Gst, GstApp, GLib
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
 SRT_INGRESS_URL  = "srt://0.0.0.0:6000?mode=listener&latency=200"
-SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=200"
+SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=200&pbkeylen=0"
 WOKADA_HTTP_URL  = "http://localhost:18888"
 WOKADA_NAMESPACE = "/test"
 
@@ -299,7 +299,6 @@ class AudioBridge:
             "aacparse ! "
             "mpegtsmux ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\" "
-            "wait-for-connection=false"
         )
 
         self.ingress_pipeline = Gst.parse_launch(ingress_str)
