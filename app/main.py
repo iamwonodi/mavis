@@ -42,8 +42,7 @@ WOKADA_NAMESPACE = "/test"
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 4800  # 2400 samples * 2 bytes — matches w-okada --chunk_size 2400
-
+CHUNK_BYTES = 3200  # 1600 samples — lower latency, reduce buffer delay
 Gst.init(None)
 
 
