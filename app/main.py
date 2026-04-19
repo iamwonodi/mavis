@@ -254,6 +254,7 @@ class AudioBridge:
             "voaacenc bitrate=128000 ! "
             "aacparse ! "
             "mpegtsmux ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             f"srtsink uri=\"{SRT_EGRESS_URL}\" wait-for-connection=true"
         )
 
