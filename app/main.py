@@ -34,15 +34,15 @@ gi.require_version('GstApp', '1.0')
 from gi.repository import Gst, GstApp, GLib
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
-SRT_INGRESS_URL  = "srt://0.0.0.0:6000?mode=listener&latency=200"
-SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=200"
+SRT_INGRESS_URL  = "srt://0.0.0.0:6000?mode=listener&latency=100"
+SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=100"
 WOKADA_HTTP_URL  = "http://localhost:18888"
 WOKADA_NAMESPACE = "/test"
 
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 6400  # 3200 samples * 2 bytes — matches w-okada --chunk_size 3200
+CHUNK_BYTES = 4800  # 2400 samples * 2 bytes — matches w-okada --chunk_size 2400
 
 Gst.init(None)
 
