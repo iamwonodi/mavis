@@ -79,6 +79,7 @@ docker run -d \
     --restart unless-stopped \
     --gpus all \
     --network host \
+    -e HF_TOKEN="your_token_here" \
     --log-driver json-file \
     --log-opt max-size=50m \
     --log-opt max-file=3 \

@@ -42,7 +42,7 @@ WOKADA_NAMESPACE = "/test"
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 3200  # 1600 samples — lower latency, reduce buffer delay
+CHUNK_BYTES = 6400  # 3200 samples * 2 bytes at 40000Hz = 80ms per chunk
 Gst.init(None)
 
 
@@ -170,7 +170,7 @@ class AudioBridge:
 
     async def send_to_wokada(self, chunk: bytes):
         arr = np.frombuffer(chunk, dtype=np.int16)
-        # Pass silence through without processing — eliminates robotic artifacts
+        # Pass silence through without processing — eliminates robotic artifactsThe Send To WOkada
         if np.max(np.abs(arr)) < 200:
             self.push_to_egress(chunk)
             return

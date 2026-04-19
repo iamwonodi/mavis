@@ -16,7 +16,7 @@ WOKADA_PORT=18888
 WOKADA_ARGS=(
     "--server_mode" "true"
     "--f0_detector"  "fcpe"
-    "--chunk_size"   "1600"
+    "--chunk_size"   "3200"
     "--extra_time"   "2.0"
     "--port"         "$WOKADA_PORT"
     "--host"         "0.0.0.0"
@@ -64,46 +64,88 @@ wait_for_wokada() {
 # Volume mount: /home/user/wokada-models → upload_dir inside container
 #
 # Model priority:
-#   1. main_*.onnx  — custom model, takes priority when present
-#   2. default_*.onnx — fallback model, always present
-#   3. Download kikoto_mahiro as last resort if volume is empty
+#   1. main_*.pth   — custom pth model, highest priority
+#   2. main_*.onnx  — custom onnx model, second priority
+#   3. default_*.pth — default pth model
+#   4. default_*.onnx — default onnx model
+#   5. Download TheAnimeMan as last resort if volume is empty
 #
-# To swap voices: place main_yourmodel.onnx in /home/user/wokada-models/
-# To revert to default: remove the main_*.onnx file and restart container
+# Index file (.index) is automatically paired with .pth if present
+# Index improves voice similarity quality significantly
+#
+# To swap voices: place main_yourmodel.pth + main_yourmodel.index
+#   in /home/user/wokada-models/ and restart container
+# To revert to default: remove main_* files and restart container
 load_model() {
     log "Loading voice model into w-okada slot 0..."
     cd "$WOKADA_DIR" || return
 
     mkdir -p upload_dir
 
-    # Priority 1: custom model
-    MODEL_FILE=$(find upload_dir -maxdepth 1 -name "main_*.onnx" 2>/dev/null | head -1)
+    # Priority 1 — custom pth model placed by user in volume
+    MODEL_FILE=$(find upload_dir -maxdepth 1 -name "main_*.pth" 2>/dev/null | head -1)
+    INDEX_FILE=$(find upload_dir -maxdepth 1 -name "main_*.index" 2>/dev/null | head -1)
 
-    # Priority 2: default model
+
+    # Priority 2 — default pth model
+    if [ -z "$MODEL_FILE" ]; then
+        MODEL_FILE=$(find upload_dir -maxdepth 1 -name "default_*.pth" 2>/dev/null | head -1)
+        INDEX_FILE=$(find upload_dir -maxdepth 1 -name "default_*.index" 2>/dev/null | head -1)
+    fi
+
+    # Priority 3 — custom onnx model placed by user in volume
+    if [ -z "$MODEL_FILE" ]; then
+        MODEL_FILE=$(find upload_dir -maxdepth 1 -name "main_*.onnx" 2>/dev/null | head -1)
+    fi
+
+    # Priority 4 — default onnx model
     if [ -z "$MODEL_FILE" ]; then
         MODEL_FILE=$(find upload_dir -maxdepth 1 -name "default_*.onnx" 2>/dev/null | head -1)
     fi
 
-    # Priority 3: nothing in volume — download fallback
+    # Priority 5 — nothing in volume, download TheAnimeMan as default
+    # TheAnimeMan is RVC V2 40k — compatible with our 40000Hz pipeline
+    # Comes with both .pth and .index for best quality output
     if [ -z "$MODEL_FILE" ]; then
-        log "No model found in upload_dir. Downloading default model..."
+        log "No model found in upload_dir. Downloading default TheAnimeMan model..."
         wget -q \
-            "https://huggingface.co/wok000/vcclient_model/resolve/main/rvc_v2_alpha/kikoto_mahiro/kikoto_mahiro_v2_40k_simple.onnx" \
-            -O "upload_dir/default_kikoto_mahiro.onnx" \
+            "https://huggingface.co/0x3e9/TheAnimeMan_RVC/resolve/main/theanimeman.zip" \
+            -O /tmp/theanimeman.zip \
             && log "Default model downloaded." \
             || { log "WARNING: Model download failed. Voice conversion unavailable."; cd - > /dev/null; return; }
-        MODEL_FILE="upload_dir/default_kikoto_mahiro.onnx"
+
+        unzip -o /tmp/theanimeman.zip -d upload_dir/ > /dev/null 2>&1
+
+        # Rename to default_ prefix so priority system works correctly
+        mv upload_dir/theanimeman.pth upload_dir/default_theanimeman.pth 2>/dev/null || true
+        mv upload_dir/*.index upload_dir/default_theanimeman.index 2>/dev/null || true
+        rm -f /tmp/theanimeman.zip
+
+        MODEL_FILE="upload_dir/default_theanimeman.pth"
+        INDEX_FILE="upload_dir/default_theanimeman.index"
     fi
 
     MODEL_NAME=$(basename "$MODEL_FILE")
+    INDEX_NAME=$(basename "$INDEX_FILE" 2>/dev/null || echo "")
+
     log "Loading model: $MODEL_NAME"
+
+    # Build load_model params
+    # Include index file if present — improves voice similarity significantly
+    # w-okada moves files from upload_dir to model_dir/0/ internally after loading
+    if [ -n "$INDEX_NAME" ] && [ -f "upload_dir/$INDEX_NAME" ]; then
+        log "Loading with index: $INDEX_NAME"
+        PARAMS="{\"voiceChangerType\":\"RVC\",\"slot\":0,\"isSampleMode\":false,\"sampleId\":\"\",\"files\":[{\"name\":\"$MODEL_NAME\",\"kind\":\"rvcModel\",\"dir\":\"\"},{\"name\":\"$INDEX_NAME\",\"kind\":\"rvcIndex\",\"dir\":\"\"}],\"params\":{}}"
+    else
+        PARAMS="{\"voiceChangerType\":\"RVC\",\"slot\":0,\"isSampleMode\":false,\"sampleId\":\"\",\"files\":[{\"name\":\"$MODEL_NAME\",\"kind\":\"rvcModel\",\"dir\":\"\"}],\"params\":{}}"
+    fi
 
     # Load model into slot 0
     # w-okada moves the file from upload_dir to model_dir/0/ internally
     curl -s -X POST "http://localhost:$WOKADA_PORT/load_model" \
         -F "slot=0" \
         -F "isHalf=false" \
-        -F "params={\"voiceChangerType\":\"RVC\",\"slot\":0,\"isSampleMode\":false,\"sampleId\":\"\",\"files\":[{\"name\":\"$MODEL_NAME\",\"kind\":\"rvcModel\",\"dir\":\"\"}],\"params\":{}}" \
+        -F "params=$PARAMS" \
         > /dev/null 2>&1
 
     sleep 3
@@ -116,9 +158,16 @@ load_model() {
     curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
         -F "key=gpu" -F "val=0" > /dev/null 2>&1
 
-    # Use FCPE pitch detector for highest quality conversion
+    # Use FCPE pitch detector for highest quality real-time conversion
     curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
         -F "key=f0Detector" -F "val=fcpe" > /dev/null 2>&1
+
+    # Full crossfade coverage — eliminates gaps at chunk boundaries
+    curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
+        -F "key=crossFadeOffsetRate" -F "val=0.0" > /dev/null 2>&1
+
+    curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
+        -F "key=crossFadeEndRate" -F "val=1.0" > /dev/null 2>&1
 
     log "Model loaded and activated: $MODEL_NAME"
     cd - > /dev/null
