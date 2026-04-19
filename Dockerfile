@@ -12,7 +12,7 @@ ENV GST_DEBUG=2
 # ── System dependencies ────────────────────────────────────────────────────────
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
-    git wget curl nano lsof build-essential pkg-config \
+    git wget curl unzip nano lsof build-essential pkg-config \
     ffmpeg libportaudio2 portaudio19-dev \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \

@@ -42,7 +42,7 @@ WOKADA_NAMESPACE = "/test"
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 6400  # 3200 samples * 2 bytes at 40000Hz = 80ms per chunk
+CHUNK_BYTES = 56000  # 28000 samples * 2 bytes at 40000Hz = 700ms per chunk
 Gst.init(None)
 
 
@@ -195,7 +195,7 @@ class AudioBridge:
                 try:
                     response = await asyncio.wait_for(
                         self.response_queue.get(),
-                        timeout=1.0
+                        timeout=2.0  # increased from 1.0 to handle larger chunk_size
                     )
                     if response is not None and len(response) > 0:
                         self.push_to_egress(response)
