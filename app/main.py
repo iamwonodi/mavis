@@ -41,6 +41,8 @@ WOKADA_NAMESPACE = "/test"
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
+CHUNK_BYTES = 6400  # 3200 samples * 2 bytes — matches w-okada --chunk_size 3200
+
 Gst.init(None)
 
 
@@ -155,46 +157,55 @@ class AudioBridge:
 
     async def process_loop(self):
         print("[BRIDGE] Processing loop active.")
+        audio_buffer = b""
         while True:
-            chunk = await self.queue.get()
+            data = await self.queue.get()
+            audio_buffer += data
+            while len(audio_buffer) >= CHUNK_BYTES:
+                chunk = audio_buffer[:CHUNK_BYTES]
+                audio_buffer = audio_buffer[CHUNK_BYTES:]
+                await self.send_to_wokada(chunk)
 
-            if self.sio_connected and self.sio:
-                try:
-                    self._timestamp += 1
-                    ts = self._timestamp
+    # ── Moving AUdio Chuncks To W-Okada For Transformation ───────────────────────────────────────────────────────
 
-                    while not self.response_queue.empty():
-                        try:
-                            self.response_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
+    async def send_to_wokada(self, chunk: bytes):
+        if self.sio_connected and self.sio:
+            try:
+                self._timestamp += 1
+                ts = self._timestamp
 
-                    await self.sio.emit(
-                        "request_message",
-                        [ts, chunk],
-                        namespace=WOKADA_NAMESPACE
-                    )
-
+                while not self.response_queue.empty():
                     try:
-                        response = await asyncio.wait_for(
-                            self.response_queue.get(),
-                            timeout=1.0
-                        )
-                        if response is not None and len(response) > 0:
-                            self.push_to_egress(response)
-                            print(f"[BRIDGE] Converted chunk {ts} pushed to egress.")
-                        else:
-                            print("[BRIDGE] w-okada returned empty. Is a model loaded?")
-                            self.push_to_egress(chunk)
-                    except asyncio.TimeoutError:
-                        print("[BRIDGE] w-okada timeout. Bypassing.")
-                        self.push_to_egress(chunk)
+                        self.response_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
-                except Exception as e:
-                    print(f"[SIO ERROR] {e}. Bypassing.")
+                await self.sio.emit(
+                    "request_message",
+                    [ts, chunk],
+                    namespace=WOKADA_NAMESPACE
+                )
+
+                try:
+                    response = await asyncio.wait_for(
+                        self.response_queue.get(),
+                        timeout=1.0
+                    )
+                    if response is not None and len(response) > 0:
+                        self.push_to_egress(response)
+                        print(f"[BRIDGE] Converted chunk {ts} pushed to egress.")
+                    else:
+                        print("[BRIDGE] w-okada returned empty. Is a model loaded?")
+                        self.push_to_egress(chunk)
+                except asyncio.TimeoutError:
+                    print("[BRIDGE] w-okada timeout. Bypassing.")
                     self.push_to_egress(chunk)
-            else:
+
+            except Exception as e:
+                print(f"[SIO ERROR] {e}. Bypassing.")
                 self.push_to_egress(chunk)
+        else:
+            self.push_to_egress(chunk)
 
     # ── Egress push ────────────────────────────────────────────────────────────
 
