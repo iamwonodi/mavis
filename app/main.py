@@ -27,6 +27,7 @@ import asyncio
 import socketio
 import signal
 import sys
+import numpy as np
 
 gi.require_version('Gst', '1.0')
 gi.require_version('GstApp', '1.0')
@@ -169,6 +170,12 @@ class AudioBridge:
     # ── Moving AUdio Chuncks To W-Okada For Transformation ───────────────────────────────────────────────────────
 
     async def send_to_wokada(self, chunk: bytes):
+        arr = np.frombuffer(chunk, dtype=np.int16)
+        # Skip w-okada if chunk is silence — avoids robotic artifacts
+        if np.max(np.abs(arr)) < 100:
+            self.push_to_egress(chunk)
+            return
+        
         if self.sio_connected and self.sio:
             try:
                 self._timestamp += 1

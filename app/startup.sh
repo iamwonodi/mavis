@@ -17,7 +17,7 @@ WOKADA_ARGS=(
     "--server_mode" "true"
     "--f0_detector"  "fcpe"
     "--chunk_size"   "3200"
-    "--extra_time"   "10.0"
+    "--extra_time"   "2.0"
     "--port"         "$WOKADA_PORT"
     "--host"         "0.0.0.0"
 )
