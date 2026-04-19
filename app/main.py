@@ -249,13 +249,13 @@ class AudioBridge:
         egress_str = (
             f"appsrc name=source_out format=time is-live=true "
             f"caps=\"{AUDIO_CAPS}\" ! "
+            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
             "audioconvert ! "
             "audioresample ! "
             "voaacenc bitrate=128000 ! "
             "aacparse ! "
             "mpegtsmux ! "
-            "queue max-size-buffers=10 max-size-time=0 max-size-bytes=0 ! "
-            f"srtsink uri=\"{SRT_EGRESS_URL}\" wait-for-connection=true"
+            f"srtsink uri=\"{SRT_EGRESS_URL}\""
         )
 
         self.ingress_pipeline = Gst.parse_launch(ingress_str)
