@@ -170,8 +170,8 @@ class AudioBridge:
 
     async def send_to_wokada(self, chunk: bytes):
         arr = np.frombuffer(chunk, dtype=np.int16)
-        # Skip w-okada if chunk is silence — avoids robotic artifacts
-        if np.max(np.abs(arr)) < 100:
+        # Pass silence through without processing — eliminates robotic artifacts
+        if np.max(np.abs(arr)) < 200:
             self.push_to_egress(chunk)
             return
         
