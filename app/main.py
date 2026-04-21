@@ -42,7 +42,7 @@ WOKADA_NAMESPACE = "/test"
 SAMPLE_RATE = 40000
 AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 56000  # 28000 samples * 2 bytes at 40000Hz = 700ms per chunk
+CHUNK_BYTES = 49152  # 24576 samples * 2 bytes at 40000Hz = 700ms per chunk
 Gst.init(None)
 
 

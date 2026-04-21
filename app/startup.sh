@@ -16,7 +16,7 @@ WOKADA_PORT=18888
 WOKADA_ARGS=(
     "--server_mode" "true"
     "--f0_detector"  "fcpe"
-    "--chunk_size"   "28000"
+    "--chunk_size"   "24576"
     "--extra_time"   "2.0"
     "--port"         "$WOKADA_PORT"
     "--host"         "0.0.0.0"
@@ -103,26 +103,26 @@ load_model() {
         MODEL_FILE=$(find upload_dir -maxdepth 1 -name "default_*.onnx" 2>/dev/null | head -1)
     fi
 
-    # Priority 5 — nothing in volume, download TheAnimeMan as default
-    # TheAnimeMan is RVC V2 40k — compatible with our 40000Hz pipeline
+    # Priority 5 — nothing in volume, download BritishWoman as default
+    # BritishWoman is RVC V2 — compatible with our 40000Hz pipeline
     # Comes with both .pth and .index for best quality output
     if [ -z "$MODEL_FILE" ]; then
-        log "No model found in upload_dir. Downloading default TheAnimeMan model..."
+        log "No model found in upload_dir. Downloading default BritishWoman model..."
         wget -q \
-            "https://huggingface.co/0x3e9/TheAnimeMan_RVC/resolve/main/theanimeman.zip" \
-            -O /tmp/theanimeman.zip \
+            "https://huggingface.co/Xhepyxopila/RandomModels/resolve/main/BritishWoman.zip" \
+            -O /tmp/britishwoman.zip \
             && log "Default model downloaded." \
             || { log "WARNING: Model download failed. Voice conversion unavailable."; cd - > /dev/null; return; }
 
-        unzip -o /tmp/theanimeman.zip -d upload_dir/ > /dev/null 2>&1
+        unzip -o /tmp/britishwoman.zip -d upload_dir/ > /dev/null 2>&1
 
         # Rename to default_ prefix so priority system works correctly
-        mv upload_dir/theanimeman.pth upload_dir/default_theanimeman.pth 2>/dev/null || true
-        mv upload_dir/*.index upload_dir/default_theanimeman.index 2>/dev/null || true
-        rm -f /tmp/theanimeman.zip
+        mv upload_dir/BritishWoman/BritishWoman.pth upload_dir/default_britishwoman.pth 2>/dev/null || true
+        mv upload_dir/BritishWoman/*.index upload_dir/default_britishwoman.index 2>/dev/null || true
+        rm -f /tmp/britishwoman.zip
 
-        MODEL_FILE="upload_dir/default_theanimeman.pth"
-        INDEX_FILE="upload_dir/default_theanimeman.index"
+        MODEL_FILE="upload_dir/default_britishwoman.pth"
+        INDEX_FILE="upload_dir/default_britishwoman.index"
     fi
 
     MODEL_NAME=$(basename "$MODEL_FILE")
