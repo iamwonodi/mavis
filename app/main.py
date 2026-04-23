@@ -39,10 +39,10 @@ SRT_EGRESS_URL   = "srt://0.0.0.0:6001?mode=listener&latency=100"
 WOKADA_HTTP_URL  = "http://localhost:18888"
 WOKADA_NAMESPACE = "/test"
 
-SAMPLE_RATE = 40000
-AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=40000,channels=1,layout=interleaved"
+SAMPLE_RATE = 48000
+AUDIO_CAPS  = "audio/x-raw,format=S16LE,rate=48000,channels=1,layout=interleaved"
 
-CHUNK_BYTES = 49152  # 24576 samples * 2 bytes at 40000Hz = 700ms per chunk
+CHUNK_BYTES = 49152  # 24576 samples * 2 bytes at 48000Hz = 700ms per chunk
 Gst.init(None)
 
 
