@@ -103,27 +103,27 @@ load_model() {
         MODEL_FILE=$(find upload_dir -maxdepth 1 -name "default_*.onnx" 2>/dev/null | head -1)
     fi
 
-    # Priority 5 — nothing in volume, download BritishWoman as default
-    # BritishWoman is RVC V2 — compatible with our 40000Hz pipeline
+    # Priority 5 — nothing in volume, download EGirl as default
+    # EGirl is RVC V2 (600 Epochs, RMVPE) — compatible with our pipeline
     # Comes with both .pth and .index for best quality output
     if [ -z "$MODEL_FILE" ]; then
-        log "No model found in upload_dir. Downloading default BritishWoman model..."
+        log "No model found in upload_dir. Downloading default EGirl model..."
         wget -q \
-            "https://huggingface.co/Xhepyxopila/RandomModels/resolve/main/BritishWoman.zip" \
-            -O /tmp/britishwoman.zip \
+            "https://huggingface.co/pendmg/Models/resolve/main/egirl.zip?download=true" \
+            -O /tmp/egirl.zip \
             && log "Default model downloaded." \
             || { log "WARNING: Model download failed. Voice conversion unavailable."; cd - > /dev/null; return; }
 
-        unzip -o /tmp/britishwoman.zip -d upload_dir/ > /dev/null 2>&1
+        unzip -o /tmp/egirl.zip -d upload_dir/ > /dev/null 2>&1
 
         # Rename to default_ prefix so priority system works correctly
-        mv upload_dir/BritishWoman/BritishWoman.pth upload_dir/default_britishwoman.pth 2>/dev/null || true
-        mv upload_dir/BritishWoman/*.index upload_dir/default_britishwoman.index 2>/dev/null || true
-        rm -f /tmp/britishwoman.zip
+        mv upload_dir/*.pth upload_dir/default_egirl.pth 2>/dev/null || true
+        mv upload_dir/*.index upload_dir/default_egirl.index 2>/dev/null || true
+        rm -f /tmp/egirl.zip
 
-        MODEL_FILE="upload_dir/default_britishwoman.pth"
-        INDEX_FILE="upload_dir/default_britishwoman.index"
-    fi
+        MODEL_FILE="upload_dir/default_egirl.pth"
+        INDEX_FILE="upload_dir/default_egirl.index"
+    fi``
 
     MODEL_NAME=$(basename "$MODEL_FILE")
     INDEX_NAME=$(basename "$INDEX_FILE" 2>/dev/null || echo "")
