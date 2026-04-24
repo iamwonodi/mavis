@@ -169,6 +169,14 @@ load_model() {
     curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
         -F "key=crossFadeEndRate" -F "val=1.0" > /dev/null 2>&1
 
+    # Set index ratio to 0.7 — controls how much the index influences output
+    curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
+        -F "key=indexRatio" -F "val=0.7" > /dev/null 2>&1
+
+    # Set pitch transposition to 10 semitones
+    curl -s -X POST "http://localhost:$WOKADA_PORT/update_settings" \
+        -F "key=tran" -F "val=10" > /dev/null 2>&1
+
     log "Model loaded and activated: $MODEL_NAME"
     cd - > /dev/null
 }

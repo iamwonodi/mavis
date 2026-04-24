@@ -58,6 +58,8 @@ class AudioBridge:
         self.sio: socketio.AsyncClient | None = None
         self.sio_connected = False
 
+        self._chunk_count = 0
+
         self._timestamp = 0
         self._sample_count = 0
         self._restarting = False
@@ -124,6 +126,7 @@ class AudioBridge:
             if result:
                 data = bytes(map_info.data)
                 buf.unmap(map_info)
+                self._chunk_count += 1  # add this line
                 if self.loop and not self.loop.is_closed():
                     self.loop.call_soon_threadsafe(self._safe_put, data)
         return Gst.FlowReturn.OK
@@ -322,23 +325,45 @@ class AudioBridge:
             print("[GST] Restarting ingress pipeline...")
             if self.ingress_pipeline:
                 self.ingress_pipeline.set_state(Gst.State.NULL)
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)  # increased from 1 to 2 seconds
                 self._sample_count = 0
+                self._chunk_count = 0 
                 self._wire_srtsrc_signals()
+                await asyncio.sleep(0.5)  # wait for signals to bind properly
                 self.ingress_pipeline.set_state(Gst.State.PLAYING)
                 print("[GST] Ingress PLAYING. Waiting for new caller...")
         finally:
             self._restarting = False
 
     async def watchdog_loop(self):
+        """
+        Two responsibilities:
+        1. Detects pipeline leaving PLAYING state unexpectedly
+        2. Detects truly stalled pipeline — no chunks flowing at all
+            for 15 seconds after a caller has connected.
+            Silence produces chunks too so this only fires on genuine stalls.
+        """
         await asyncio.sleep(30)
+        last_chunk_count = self._chunk_count
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(15)
             if self.ingress_pipeline and self._caller_ever_connected:
+                # Check pipeline state
                 state = self.ingress_pipeline.get_state(0)[1]
                 if state != Gst.State.PLAYING:
                     print("[WATCHDOG] Ingress not PLAYING. Restarting...")
                     await self.restart_ingress()
+                    last_chunk_count = self._chunk_count
+                    continue
+
+                # Check for truly stalled pipeline — silence still produces
+                # chunks so chunk_count advances even during silence.
+                # If count has not changed at all the pipeline is genuinely stalled.
+                current_chunk_count = self._chunk_count
+                if current_chunk_count == last_chunk_count:
+                    print("[WATCHDOG] Pipeline stalled — no chunks for 15s. Restarting...")
+                    await self.restart_ingress()
+                last_chunk_count = current_chunk_count
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
