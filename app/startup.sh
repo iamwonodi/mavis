@@ -123,7 +123,7 @@ load_model() {
 
         MODEL_FILE="upload_dir/default_egirl.pth"
         INDEX_FILE="upload_dir/default_egirl.index"
-    fi``
+    fi
 
     MODEL_NAME=$(basename "$MODEL_FILE")
     INDEX_NAME=$(basename "$INDEX_FILE" 2>/dev/null || echo "")
