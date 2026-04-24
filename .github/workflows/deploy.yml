@@ -132,32 +132,32 @@ jobs:
           git tag "$VERSION" -m "Release $VERSION [ci skip]"
           git push origin "$VERSION"
 
-      # ── ECR Cleanup: remove untagged images after every push ────────────────
-      # This keeps ECR clean by deleting the unnamed 'Image' entries that
-      # accumulate as old manifests whenever tags are updated.
-      - name: Clean up untagged ECR images
-        run: |
-          echo "Fetching untagged image digests..."
-          UNTAGGED=$(aws ecr list-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" \
-            --filter tagStatus=UNTAGGED \
-            --query 'imageIds[*]' \
-            --output json)
+      # # ── ECR Cleanup: remove untagged images after every push ────────────────
+      # # This keeps ECR clean by deleting the unnamed 'Image' entries that
+      # # accumulate as old manifests whenever tags are updated.
+      # - name: Clean up untagged ECR images
+      #   run: |
+      #     echo "Fetching untagged image digests..."
+      #     UNTAGGED=$(aws ecr list-images \
+      #       --repository-name "$ECR_REPOSITORY" \
+      #       --region "$AWS_REGION" \
+      #       --filter tagStatus=UNTAGGED \
+      #       --query 'imageIds[*]' \
+      #       --output json)
 
-          COUNT=$(echo "$UNTAGGED" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+      #     COUNT=$(echo "$UNTAGGED" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
 
-          if [ "$COUNT" -gt "0" ]; then
-            echo "Deleting $COUNT untagged image(s)..."
-            aws ecr batch-delete-image \
-              --repository-name "$ECR_REPOSITORY" \
-              --region "$AWS_REGION" \
-              --image-ids "$UNTAGGED" \
-              --output text
-            echo "Untagged images deleted."
-          else
-            echo "No untagged images to clean up."
-          fi
+      #     if [ "$COUNT" -gt "0" ]; then
+      #       echo "Deleting $COUNT untagged image(s)..."
+      #       aws ecr batch-delete-image \
+      #         --repository-name "$ECR_REPOSITORY" \
+      #         --region "$AWS_REGION" \
+      #         --image-ids "$UNTAGGED" \
+      #         --output text
+      #       echo "Untagged images deleted."
+      #     else
+      #       echo "No untagged images to clean up."
+      #     fi
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 3: Deploy to TensorDock via tmux
